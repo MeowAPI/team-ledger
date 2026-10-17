@@ -34,7 +34,7 @@ def parse(text, conf):
     body = {'model': os.getenv('AI_MODEL'), 'messages': [{'role': 'system', 'content': prompt}, {'role': 'user', 'content': text}],
             'response_format': format_config}
     request = urllib.request.Request(os.getenv('AI_BASE_URL', 'https://api.openai.com/v1').rstrip('/') + '/chat/completions',
-        data=json.dumps(body).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + os.environ['AI_API_KEY']})
+        data=json.dumps(body).encode(), headers={'Content-Type': 'application/json', 'User-Agent': 'TeamLedger/1.0', 'Authorization': 'Bearer ' + os.environ['AI_API_KEY']})
     try:
         with urllib.request.urlopen(request, timeout=40) as response:
             payload = json.loads(response.read(1_000_000))
