@@ -182,7 +182,7 @@ COOKIE_SECURE=true
 
 Docker 的 Web 和 bot 共用 `ledger-data` 命名卷。数据库适合单台服务器上的小团队，不要放到 NFS 或多主机同时写入。
 
-GitHub Actions 自动运行账务测试、构建并启动 AMD64 容器、检查健康接口和初始空账本，再发布 AMD64 / ARM64 双架构镜像。ARM64 在构建时通过 QEMU 模拟，不包含 ARM64 运行验证。
+GitHub Actions 自动运行账务测试、构建并启动 AMD64 容器、检查健康接口和初始空账本，再发布 AMD64 / ARM64 双架构镜像。发布后还会在无登录凭据的环境验证多架构清单和匿名拉取。ARM64 在构建时通过 QEMU 模拟，不包含 ARM64 运行验证。
 
 ### 自动发布规则
 

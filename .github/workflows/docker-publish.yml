@@ -47,6 +47,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -132,3 +135,29 @@ jobs:
             printf '\n`%s@%s`\n\n' "$IMAGE" "$DIGEST"
             printf '```text\n%s\n```\n' "$TAGS"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-public-image:
+    name: Verify anonymous image pull
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Verify public multi-platform manifest and download
+        shell: bash
+        env:
+          IMAGE: ${{ needs.publish.outputs.image }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$(mktemp -d)"
+          docker manifest inspect "$IMAGE@$DIGEST" > "$RUNNER_TEMP/ledger-manifest.json"
+          python - "$RUNNER_TEMP/ledger-manifest.json" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as stream:
+              manifest = json.load(stream)
+          platforms = {(m.get('platform', {}).get('os'), m.get('platform', {}).get('architecture')) for m in manifest['manifests']}
+          assert {('linux', 'amd64'), ('linux', 'arm64')} <= platforms
+          print('Verified public AMD64 and ARM64 manifest without registry credentials')
+          PY
+          docker pull "$IMAGE@$DIGEST"
