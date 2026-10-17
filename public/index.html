@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#234b3e">
+  <title>一起记 · 小团队的共同账本</title>
+  <link rel="icon" href="/static/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div id="loading" class="initial-loading"><span class="brand-mark">记</span><p>正在打开团队账本…</p></div>
+  <section id="auth" class="auth-layout" hidden>
+    <div class="auth-story"><div class="brand"><span class="brand-mark">记</span><strong>一起记<span>TEAM LEDGER</span></strong></div>
+      <div class="auth-headline"><span class="eyebrow">小团队的共同账本</span><h1>每一笔付出，<br>都有据可报。</h1><p>你付的、我垫的，清清楚楚。<br>从一笔记账，到一次安心的报销。</p><div class="auth-illustration"><div class="paper-card"><span>我们的团队账本</span><b>支出有记录<br>报销有着落</b><div class="paper-lines"></div><span class="paper-check">✓</span></div><div class="floating-tag">Web + Telegram</div></div></div>
+      <small>为并肩做事的人，记好每一笔。</small>
+    </div>
+    <div class="auth-form-wrap"><form id="auth-form" class="auth-form"><span class="eyebrow">WELCOME TOGETHER</span><h2 id="auth-title">欢迎回来</h2><p id="auth-subtitle" class="muted">登录，继续管理团队的每一笔收支。</p>
+      <label class="setup-only" hidden>团队名称<input name="team_name" placeholder="例如：周五工作室" maxlength="40"></label>
+      <label class="setup-only" hidden>你的姓名<input name="name" placeholder="团队里的称呼" maxlength="30"></label>
+      <label>用户名<input name="username" autocomplete="username" placeholder="输入用户名" required maxlength="32"></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" placeholder="至少 10 位字符" required minlength="10" maxlength="128"></label>
+      <div id="auth-error" class="form-error" role="alert"></div><button class="btn primary wide" type="submit" id="auth-submit">登录账本 →</button><p class="auth-note">扁平团队，共同管理。账号可由任意现有成员创建。</p>
+    </form></div>
+  </section>
+  <div id="app" class="app-layout" hidden>
+    <aside class="sidebar" id="sidebar"><a class="brand" href="#overview"><span class="brand-mark">记</span><strong>一起记<span>TEAM LEDGER</span></strong></a>
+      <div class="workspace"><span class="workspace-avatar">T</span><div><strong id="workspace-name">我的团队</strong><span>一起做事 · 一起记账</span></div><span class="workspace-dot"></span></div>
+      <div class="nav-label">工作空间</div><nav id="navigation" aria-label="主导航"></nav>
+      <div class="sidebar-tip"><span class="tip-icon">↗</span><strong>随手记，少惦记。</strong><p>试试在 Telegram 里说一句<br>「今天打车花了 35 元」</p><a href="#integrations">连接你的机器人 →</a></div>
+      <div class="sidebar-bottom"><a href="#settings" class="settings-link" id="settings-link"></a><button id="profile-button" class="profile-button"><span class="avatar" id="my-avatar"></span><span><strong id="my-name"></strong><small id="my-role"></small></span><span class="profile-dots">•••</span></button></div>
+    </aside>
+    <main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-button mobile-menu" id="mobile-menu" aria-label="打开导航">☰</button><span>工作空间</span><span class="slash">/</span><strong id="breadcrumb-title">团队总览</strong></div><div class="topbar-right"><button class="icon-button" id="refresh-ledger" aria-label="刷新团队账本" title="刷新团队账本">↻</button><span class="live-dot"></span><span id="top-date"></span><span class="topbar-divider"></span><span id="top-user"></span></div></header>
+      <div id="content" class="content"></div><footer class="main-footer"><span>一起记 · 小团队的共同账本</span><span>每一笔，都算数。</span></footer>
+    </main>
+  </div>
+  <dialog id="entry-dialog" class="modal"><form id="entry-form"><div class="modal-heading"><div><span class="eyebrow">KEEP IT TOGETHER</span><h2 id="entry-title">记一笔</h2></div><button type="button" class="icon-button" data-close aria-label="关闭">✕</button></div>
+    <div class="segmented" id="entry-kind"><button type="button" data-kind="expense" class="active">成员垫付</button><button type="button" data-kind="income">团队收入</button></div>
+    <div class="form-grid"><label class="amount-field">金额<input name="amount" placeholder="0.00" inputmode="decimal" required autocomplete="off"></label><label>币种<select name="currency" required></select></label></div>
+    <label>用途 / 收入说明<input name="description" placeholder="这笔钱用在了哪里？" maxlength="120" required></label>
+    <label>发生日期<input name="date" type="date" required></label>
+    <label id="payer-label">垫付成员<select name="payer_id"></select></label><label>备注 <span class="optional">选填</span><textarea name="note" rows="2" maxlength="1000" placeholder="补充项目、商家或其他信息"></textarea></label>
+    <label class="upload-zone"><input type="file" name="receipt" accept="image/png,image/jpeg,application/pdf"><span id="upload-label">＋ 添加发票或凭证 <small>PNG / JPG / PDF，最多 6 MB</small></span></label>
+    <div class="form-error" id="entry-error" role="alert"></div><div class="modal-footer"><span id="entry-hint">提交后进入待审核，审核通过后即可报销。</span><button type="button" class="btn" id="save-draft">保存草稿</button><button class="btn primary" type="submit" id="save-entry">提交报销</button></div>
+  </form></dialog>
+  <dialog id="detail-dialog" class="modal"><div id="detail-content"></div></dialog>
+  <dialog id="member-dialog" class="modal small"><form id="member-form"><div class="modal-heading"><h2>邀请新伙伴</h2><button type="button" class="icon-button" data-close aria-label="关闭">✕</button></div><p class="muted">创建独立账号。每位伙伴都能共同管理账本和报销。</p><label>姓名<input name="name" required maxlength="30" placeholder="成员称呼"></label><label>用户名<input name="username" required pattern="[a-zA-Z0-9_.-]{3,32}" placeholder="3–32 位英文字母或数字"></label><label>初始密码<input name="password" required minlength="10" maxlength="128" type="password" autocomplete="new-password" placeholder="至少 10 位，成员登录后可修改"></label><div class="form-error" id="member-error"></div><button class="btn primary wide" type="submit">创建成员账号</button></form></dialog>
+  <dialog id="action-dialog" class="modal small"><form id="action-form"><div class="modal-heading"><h2 id="action-title"></h2><button type="button" class="icon-button" data-close aria-label="关闭">✕</button></div><p class="muted" id="action-description"></p><div id="action-totals" class="action-totals"></div><label id="action-note-label">备注<textarea name="note" rows="3" maxlength="500"></textarea></label><div class="form-error" id="action-error"></div><button class="btn primary wide" type="submit" id="action-confirm">确认</button></form></dialog>
+  <dialog id="profile-dialog" class="modal small"><form id="password-form"><div class="modal-heading"><h2>账户与安全</h2><button type="button" class="icon-button" data-close aria-label="关闭">✕</button></div><label>原密码<input name="old_password" type="password" required autocomplete="current-password"></label><label>新密码<input name="password" type="password" required minlength="10" maxlength="128" autocomplete="new-password"></label><div class="form-error" id="password-error"></div><button class="btn primary wide" type="submit">更新密码</button><button type="button" class="btn wide logout-button" id="logout">退出登录</button></form></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

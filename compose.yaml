@@ -1,0 +1,27 @@
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8765
+      DATA_DIR: /app/data
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ledger-data:/app/data
+  bot:
+    build: .
+    restart: unless-stopped
+    profiles: [telegram]
+    env_file: .env
+    environment:
+      DATA_DIR: /app/data
+    command: ["python", "-m", "app.bot"]
+    healthcheck:
+      disable: true
+    volumes:
+      - ledger-data:/app/data
+volumes:
+  ledger-data:
