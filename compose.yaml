@@ -1,5 +1,6 @@
 services:
   web:
+    image: ${LEDGER_IMAGE:-ghcr.io/meowapi/team-ledger:latest}
     build: .
     restart: unless-stopped
     env_file: .env
@@ -12,6 +13,7 @@ services:
     volumes:
       - ledger-data:/app/data
   bot:
+    image: ${LEDGER_IMAGE:-ghcr.io/meowapi/team-ledger:latest}
     build: .
     restart: unless-stopped
     profiles: [telegram]

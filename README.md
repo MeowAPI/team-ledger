@@ -1,5 +1,7 @@
 # 一起记 · 小团队共同账本
 
+[![Docker build](https://github.com/MeowAPI/team-ledger/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/MeowAPI/team-ledger/actions/workflows/docker-publish.yml)
+
 供扁平化小团队使用的 Web + Telegram 记账系统。每位成员都有独立账号，拥有相同的管理权限。没有分类功能。
 
 ## 已实现
@@ -145,6 +147,22 @@ AI 识别会把**当前输入的文字、团队币种配置和当前日期**发�
 
 ## Docker 部署
 
+推荐直接使用 GitHub Actions 构建的 GHCR 镜像：
+
+```sh
+docker pull ghcr.io/meowapi/team-ledger:latest
+cp .env.example .env
+# 编辑 .env
+docker compose pull
+docker compose up -d --no-build
+# 配置机器人后
+docker compose --profile telegram up -d --no-build
+```
+
+Web 和 bot 使用同一镜像，数据通过命名卷持久化。要固定到某个版本，在 `.env` 中设置 `LEDGER_IMAGE=ghcr.io/meowapi/team-ledger:版本号`，再执行 `docker compose pull` 和 `docker compose up -d --no-build`。
+
+也可从源码自行构建：
+
 ```sh
 cp .env.example .env
 # 编辑 .env
@@ -164,7 +182,17 @@ COOKIE_SECURE=true
 
 Docker 的 Web 和 bot 共用 `ledger-data` 命名卷。数据库适合单台服务器上的小团队，不要放到 NFS 或多主机同时写入。
 
-本项目已提供 Dockerfile / Compose；当前环境没有构建运行容器，需在目标服务器验证 Docker 部署。
+GitHub Actions 自动运行账务测试、构建并启动 AMD64 容器、检查健康接口和初始空账本，再发布 AMD64 / ARM64 双架构镜像。ARM64 在构建时通过 QEMU 模拟，不包含 ARM64 运行验证。
+
+### 自动发布规则
+
+- 推送 `main`：发布 `latest`、`main` 和完整提交 SHA 标签。
+- 推送 `v1.2.3` 这样的版本标签：发布 `1.2.3`、`1.2` 和提交 SHA 标签。
+- Pull Request：只运行测试，不发布镜像。
+- 可在 Actions 的「Test and publish Docker image」中手动运行。
+- 使用仓库自带的 `GITHUB_TOKEN` 发布 GHCR，无需额外填写 Docker Hub 密钥。
+
+镜像地址：`ghcr.io/meowapi/team-ledger`。构建状态和镜像摘要见 [GitHub Actions](https://github.com/MeowAPI/team-ledger/actions/workflows/docker-publish.yml)。
 
 ## 保存与备份
 
