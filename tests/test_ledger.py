@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import tempfile
 import time
@@ -70,6 +71,23 @@ class LedgerTest(unittest.TestCase):
         with db() as conn:
             user = conn.execute('SELECT * FROM users').fetchone()
             self.assertNotIn('test-password', user['password_hash'])
+
+    def test_asset_urls_refresh_when_frontend_content_changes(self):
+        public=Path(self.temp.name)/'public'
+        public.mkdir()
+        (public/'index.html').write_text('<link href="/static/style.css"><script src="/static/app.js"></script>',encoding='utf-8')
+        (public/'style.css').write_text('body{}',encoding='utf-8')
+        (public/'app.js').write_text('console.log(1)',encoding='utf-8')
+        with patch('app.main.PUBLIC',public):
+            first=self.client.get('/')
+            (public/'app.js').write_text('console.log(2)',encoding='utf-8')
+            second=self.client.get('/')
+        scripts=[re.search(r'src="([^"]+)"',r.text).group(1) for r in (first,second)]
+        styles=[re.search(r'href="([^"]+)"',r.text).group(1) for r in (first,second)]
+        self.assertNotEqual(scripts[0],scripts[1])
+        self.assertEqual(styles[0],styles[1])
+        self.assertIn('?',scripts[1])
+        self.assertEqual(second.headers['cache-control'],'no-store')
 
     def test_all_members_are_administrators(self):
         member = self.new_member()

@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 from fastapi import FastAPI, Request, Response, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from . import config, ai, fx
 from .db import db, init_db, settings
@@ -431,7 +431,11 @@ def export(request: Request):
 
 @app.get('/')
 def index():
-    return FileResponse(PUBLIC / 'index.html')
+    html = (PUBLIC / 'index.html').read_text(encoding='utf-8')
+    for asset in ('app.js', 'style.css'):
+        version = hashlib.sha256((PUBLIC / asset).read_bytes()).hexdigest()[:12]
+        html = html.replace(f'/static/{asset}"', f'/static/{asset}?v={version}"')
+    return HTMLResponse(html, headers={'Cache-Control': 'no-store'})
 
 
 app.mount('/static', StaticFiles(directory=PUBLIC), name='static')
