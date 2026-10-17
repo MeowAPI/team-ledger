@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
@@ -78,7 +79,7 @@ class LedgerTest(unittest.TestCase):
         self.headers = {'X-CSRF-Token':login.json()['csrf']}
         self.entry(kind='income', amount='50')
         e = self.entry(payer_id=self.user['id'])
-        self.assertEqual(self.action(e,'approve').status_code, 200)
+        self.assertEqual(e['status'], 'pending')
         self.assertEqual(self.action(e,'pay','支付宝').status_code, 200)
         self.assertEqual(self.client.put('/api/settings',json={'team_name':'共同管理'},headers=self.headers).status_code,200)
 
@@ -135,20 +136,18 @@ class LedgerTest(unittest.TestCase):
     def test_batch_action_rolls_back_on_stale_row(self):
         a=self.entry()
         b=self.entry(kind='income')
-        result=self.post('/entries/action',{'ids':[a['id'],b['id']],'action':'approve'})
+        result=self.post('/entries/action',{'ids':[a['id'],b['id']],'action':'pay','note':'批量付款'})
         self.assertEqual(result.status_code,400)
         entries=self.client.get('/api/entries').json()
-        self.assertEqual(next(e for e in entries if e['id']==a['id'])['status'],'submitted')
+        self.assertEqual(next(e for e in entries if e['id']==a['id'])['status'],'pending')
         self.assertEqual(len(self.client.get(f'/api/entries/{a["id"]}/events').json()),1)
 
     def test_reimbursement_lifecycle_requires_confirmation_note(self):
-        e=self.entry(amount='37.50')
+        e=self.entry(amount='37.50',status='draft')
         self.assertEqual(self.action(e,'pay','银行').status_code,409)
-        self.assertEqual(self.action(e,'reject').status_code,400)
-        self.assertEqual(self.action(e,'reject','请补充说明').status_code,200)
-        body={**e,'amount':'38.00','note':'已补充','status':'submitted'}
+        self.assertEqual(self.action(e,'submit').status_code,200)
+        body={**e,'amount':'38.00','note':'已补充','status':'pending'}
         self.assertEqual(self.client.put('/api/entries/'+str(e['id']),json=body,headers=self.headers).status_code,200)
-        self.assertEqual(self.action(e,'approve').status_code,200)
         self.assertEqual(self.action(e,'pay').status_code,400)
         self.assertEqual(self.action(e,'pay','转账 TX123').status_code,200)
         self.assertEqual(self.action(e,'pay','重复付款').status_code,409)
@@ -159,14 +158,13 @@ class LedgerTest(unittest.TestCase):
 
     def test_calculation_does_not_double_count_advances(self):
         self.entry(kind='income',amount='100',currency='USD')
-        approved=self.entry(amount='300')
-        self.action(approved,'approve')
+        self.entry(amount='300')
         paid=self.entry(amount='50',currency='USD')
-        self.action(paid,'approve');self.action(paid,'pay','已转账')
+        self.action(paid,'pay','已转账')
         self.entry(amount='40',currency='USD')
         self.entry(amount='9999',status='draft')
         r=self.client.get('/api/report').json()
-        for key,expected in {'income':'700.00','paid':'350.00','cash':'350.00','due':'580.00','approved':'300.00','reserve':'350.00','payable':'300.00','remaining':'0.00','shortage':'230.00'}.items():
+        for key,expected in {'income':'700.00','paid':'350.00','cash':'350.00','due':'580.00','reserve':'350.00','payable':'350.00','remaining':'0.00','shortage':'230.00'}.items():
             self.assertEqual(r[key],expected,key)
         self.assertEqual(r['balances'],{'USD':'50'})
 
@@ -179,6 +177,60 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(r['reserve'],'150.00')
         self.assertEqual(r['remaining'],'20.00')
         self.assertEqual(len(self.client.get('/api/entries').json()),before)
+
+    def test_pending_reimbursements_share_funds_in_expense_date_order(self):
+        member=self.new_member()
+        self.entry(kind='income',amount='100')
+        self.entry(amount='80',description='较新的垫付')
+        yesterday=(date.fromisoformat(config.today())-timedelta(days=1)).isoformat()
+        self.entry(amount='80',payer_id=member['id'],date=yesterday,description='较早的垫付')
+        report=self.client.get('/api/report').json()
+        self.assertEqual(report['payable'],'100.00')
+        self.assertEqual(report['shortage'],'60.00')
+        groups={row['id']:row for row in report['members']}
+        self.assertEqual(groups[member['id']]['suggested'],'80.00')
+        self.assertEqual(groups[self.user['id']]['suggested'],'20.00')
+        self.assertNotIn('approved',report)
+
+    def test_approval_actions_are_removed(self):
+        expense=self.entry()
+        for action in ('approve','reject'):
+            self.assertEqual(self.action(expense,action,'不需要审核').status_code,400)
+        self.assertEqual(self.client.get('/api/entries').json()[0]['status'],'pending')
+        self.assertEqual(len(self.client.get(f'/api/entries/{expense["id"]}/events').json()),1)
+
+    def test_legacy_status_migration_preserves_money_and_history(self):
+        self.entry(kind='income',amount='100')
+        legacy=[self.entry(amount=amount) for amount in ('10','20','30')]
+        paid=self.entry(amount='40')
+        self.assertEqual(self.action(paid,'pay','旧付款凭证').status_code,200)
+        with db(write=True) as conn:
+            for entry,status in zip(legacy,('submitted','approved','rejected')):
+                conn.execute('UPDATE entries SET status=?,review_note=? WHERE id=?',(status,'历史处理备注',entry['id']))
+            conn.execute('INSERT INTO events(entry_id,user_id,action,detail,created_at) VALUES (?,?,?,?,?)',
+                         (legacy[1]['id'],self.user['id'],'approve','历史记录',config.now()))
+            before=[dict(row) for row in conn.execute('SELECT * FROM entries ORDER BY id')]
+            history=[dict(row) for row in conn.execute('SELECT * FROM events ORDER BY id')]
+        init_db()
+        with db() as conn:
+            after=[dict(row) for row in conn.execute('SELECT * FROM entries ORDER BY id')]
+            self.assertEqual([dict(row) for row in conn.execute('SELECT * FROM events ORDER BY id')],history)
+        mapping={'submitted':'pending','approved':'pending','rejected':'draft'}
+        for old,new in zip(before,after):
+            self.assertEqual(new,{**old,'status':mapping.get(old['status'],old['status'])})
+        init_db()
+        with db() as conn:
+            self.assertEqual([dict(row) for row in conn.execute('SELECT * FROM entries ORDER BY id')],after)
+        report=self.client.get('/api/report').json()
+        self.assertEqual(report['due'],'30.00')
+        self.assertEqual(report['paid'],'40.00')
+        self.assertEqual(report['payable'],'30.00')
+        self.assertEqual(self.action(legacy[1],'pay','无需再次处理').status_code,200)
+
+    def test_older_open_forms_record_pending_expenses(self):
+        entry=self.entry(status='submitted')
+        self.assertEqual(entry['status'],'pending')
+        self.assertEqual(self.action(entry,'pay','直接报销').status_code,200)
 
     def test_voided_income_does_not_fund_reimbursements(self):
         e=self.entry(kind='income',amount='100')
@@ -248,7 +300,8 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(self.post(url,{'data':base64.b64encode(b'<svg></svg>').decode(),'name':'a.svg'}).status_code,400)
         self.assertEqual(self.post(url,{'data':base64.b64encode(b'%PDF-1.4 test').decode(),'name':'test.pdf'}).status_code,200)
         self.assertEqual(self.client.get('/api'+url).status_code,200)
-        self.action(e,'approve')
+        self.assertEqual(self.post(url,{'data':base64.b64encode(b'%PDF-1.4 updated').decode(),'name':'updated.pdf'}).status_code,200)
+        self.action(e,'pay','付款后锁定凭证')
         self.assertEqual(self.post(url,{'data':base64.b64encode(b'%PDF-1.4 other').decode(),'name':'other.pdf'}).status_code,409)
         self.post('/logout')
         self.assertEqual(self.client.get('/api'+url).status_code,401)
@@ -313,6 +366,11 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(len(entries),1)
         self.assertEqual(entries[0]['amount'],'49.50')
         self.assertEqual(entries[0]['source'],'telegram')
+        self.assertEqual(entries[0]['status'],'pending')
+        with db() as conn:
+            messages=[json.loads(r['payload']).get('text','') for r in conn.execute('SELECT payload FROM tg_outbox')]
+        self.assertTrue(any('已加入待报销' in message for message in messages))
+        self.assertFalse(any('等待审核' in message for message in messages))
 
     def test_telegram_income_buttons(self):
         self.link_bot();bot.process_update(self.message(2,'/income'))
@@ -335,7 +393,7 @@ class LedgerTest(unittest.TestCase):
         bot.process_update(self.callback(3,f'd:{token}:save',sender=456))
         self.assertEqual(len(self.client.get('/api/entries').json()),0)
 
-    def test_unapproved_telegram_group_is_ignored(self):
+    def test_unlisted_telegram_group_is_ignored(self):
         self.link_bot()
         with db() as conn:before=conn.execute('SELECT COUNT(*) FROM tg_outbox').fetchone()[0]
         bot.process_update(self.message(2,'/book',chat=-999,private=False))

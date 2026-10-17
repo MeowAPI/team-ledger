@@ -85,9 +85,8 @@ def calculate(entries, conf, fx, scenario=None):
     income = sum((convert(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'), Decimal(0))
     today_income = sum((convert(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted' and e['date'] == today()), Decimal(0))
     paid = sum((convert(e) for e in entries if e['status'] == 'reimbursed'), Decimal(0))
-    due_entries = sorted((e for e in entries if e['status'] in ('submitted', 'approved')), key=lambda e: (e['date'], e['id']))
+    due_entries = sorted((e for e in entries if e['status'] == 'pending'), key=lambda e: (e['date'], e['id']))
     due = sum((convert(e) for e in due_entries), Decimal(0))
-    approved = sum((convert(e) for e in due_entries if e['status'] == 'approved'), Decimal(0))
     extra = Decimal(0)
     if scenario:
         cur = currency(conf, scenario['currency'])
@@ -96,24 +95,22 @@ def calculate(entries, conf, fx, scenario=None):
     cash = income - paid + extra
     available = max(cash, Decimal(0))
     reserve = min(available, due)
-    payable = min(available, approved)
+    payable = reserve
     groups = {}
     left = payable
-    # Only approved entries enter the payment suggestion. Oldest approved entries first.
-    for entry in sorted(due_entries, key=lambda e: (e['status'] != 'approved', e['date'], e['id'])):
+    # Every pending reimbursement is eligible, in expense-date order.
+    for entry in due_entries:
         key = entry['payer_id']
         if key not in groups:
-            groups[key] = {'id': key, 'name': entry['payer_name'], 'due': Decimal(0), 'approved': Decimal(0), 'suggested': Decimal(0)}
+            groups[key] = {'id': key, 'name': entry['payer_name'], 'due': Decimal(0), 'suggested': Decimal(0)}
         amount = convert(entry)
         groups[key]['due'] += amount
-        if entry['status'] == 'approved':
-            groups[key]['approved'] += amount
-            portion = min(left, amount)
-            groups[key]['suggested'] += portion
-            left -= portion
-    common.update({k: formatted(v) for k, v in dict(income=income, today_income=today_income, paid=paid, cash=cash, due=due, approved=approved,
+        portion = min(left, amount)
+        groups[key]['suggested'] += portion
+        left -= portion
+    common.update({k: formatted(v) for k, v in dict(income=income, today_income=today_income, paid=paid, cash=cash, due=due,
                    reserve=reserve, payable=payable, remaining=cash-reserve, shortage=max(due-available, Decimal(0)), extra=extra).items()})
-    common['members'] = [{**g, **{k: formatted(g[k]) for k in ('due', 'approved', 'suggested')}} for g in groups.values()]
+    common['members'] = [{**g, **{k: formatted(g[k]) for k in ('due', 'suggested')}} for g in groups.values()]
     return common
 
 
@@ -123,8 +120,8 @@ def report(base=None, scenario=None, force=False):
         base = base or conf['reference_currency']
         currency(conf, base)
         entries = [dict(e) for e in conn.execute('SELECT e.*,u.name payer_name FROM entries e JOIN users u ON u.id=e.payer_id')]
-    # Ignore unused draft/rejected currencies when looking up rates.
-    codes = {e['currency'] for e in entries if (e['kind'] == 'income' and e['status'] == 'posted') or e['status'] in ('submitted', 'approved', 'reimbursed')}
+    # Ignore drafts and voided entries when looking up rates.
+    codes = {e['currency'] for e in entries if (e['kind'] == 'income' and e['status'] == 'posted') or e['status'] in ('pending', 'reimbursed')}
     if scenario:
         currency(conf, scenario['currency'])
         minor_amount(scenario['amount'], currency(conf, scenario['currency'])['decimals'])

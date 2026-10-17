@@ -96,9 +96,11 @@ def normalized_entry(conn, user, body):
         admin(user)
     if not conn.execute('SELECT id FROM users WHERE id=? AND active=1', (payer_id,)).fetchone():
         fail('成员不存在或已停用')
-    status = body.get('status', 'submitted') if kind == 'expense' else 'posted'
-    if status not in (('draft', 'submitted') if kind == 'expense' else ('posted',)):
-        fail('新支出只能保存为草稿或提交报销')
+    status = body.get('status', 'pending') if kind == 'expense' else 'posted'
+    if status == 'submitted':
+        status = 'pending'  # Older open forms and persisted Telegram drafts remain usable.
+    if status not in (('draft', 'pending') if kind == 'expense' else ('posted',)):
+        fail('新支出只能保存为草稿或待报销账目')
     return {'kind': kind, 'amount_minor': amount, 'currency': cur['code'], 'decimals': cur['decimals'],
             'description': description, 'category': '', 'date': entry_date.isoformat(),
             'payer_id': payer_id, 'status': status, 'note': text_value(body.get('note', ''), '备注', 1000, False)}
@@ -143,7 +145,7 @@ def add_entry(conn, user, body, source='web', source_key=None):
 def transition(conn, user, entry_id, action, note=''):
     entry = entry_view(conn, entry_id)
     if action == 'void':
-        if entry['kind'] == 'income' or entry['payer_id'] != user['id'] or entry['status'] == 'approved':
+        if entry['kind'] == 'income' or entry['payer_id'] != user['id']:
             admin(user)
         if entry['status'] in ('reimbursed', 'voided'):
             fail('已报销或已作废账目不能再次作废', 409)
@@ -153,11 +155,9 @@ def transition(conn, user, entry_id, action, note=''):
         return entry_view(conn, entry_id)
     if entry['kind'] != 'expense':
         fail('收入无需报销')
-    note = text_value(note, '审核备注', 500, False)
-    transitions = {'submit': (('draft', 'rejected'), 'submitted'),
-                   'approve': (('submitted',), 'approved'),
-                   'reject': (('submitted',), 'rejected'),
-                   'pay': (('approved',), 'reimbursed')}
+    note = text_value(note, '处理备注', 500, False)
+    transitions = {'submit': (('draft',), 'pending'),
+                   'pay': (('pending',), 'reimbursed')}
     if action not in transitions:
         fail('操作不正确')
     if action == 'submit':
@@ -168,8 +168,6 @@ def transition(conn, user, entry_id, action, note=''):
     allowed, target = transitions[action]
     if entry['status'] not in allowed:
         fail('账目状态已变化，请刷新后重试', 409)
-    if action == 'reject' and not note:
-        fail('请填写驳回原因')
     if action == 'pay' and not note:
         fail('请填写付款方式或付款参考号')
     paid_at = now() if action == 'pay' else None
@@ -181,8 +179,8 @@ def transition(conn, user, entry_id, action, note=''):
 
 def edit_entry(conn, user, entry_id, body):
     old = entry_view(conn, entry_id)
-    if old['kind'] != 'expense' or old['status'] not in ('draft', 'rejected'):
-        fail('仅草稿或已驳回的支出可以修改', 409)
+    if old['kind'] != 'expense' or old['status'] not in ('draft', 'pending'):
+        fail('仅草稿或待报销支出可以修改', 409)
     if old['payer_id'] != user['id']:
         admin(user)
     data = normalized_entry(conn, user, body)

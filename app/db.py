@@ -77,12 +77,16 @@ def db(write=False):
 
 def init_db():
     config.DATA.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(config.DB_PATH)
+    conn = sqlite3.connect(config.DB_PATH, timeout=15)
     try:
+        conn.execute('PRAGMA busy_timeout=15000')
         conn.execute('PRAGMA journal_mode=WAL')
         conn.executescript(SCHEMA)
         conn.execute("UPDATE users SET role='owner' WHERE role<>'owner'")
         conn.execute("DELETE FROM settings WHERE key='categories'")
+        # Retire the approval workflow without changing amounts, payment data or history.
+        conn.execute("UPDATE entries SET status='pending' WHERE kind='expense' AND status IN ('submitted','approved')")
+        conn.execute("UPDATE entries SET status='draft' WHERE kind='expense' AND status='rejected'")
         for key, value in DEFAULTS.items():
             conn.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', (key, json.dumps(value, ensure_ascii=False)))
         conn.commit()

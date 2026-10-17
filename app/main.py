@@ -312,8 +312,8 @@ def upload_receipt(entry_id: int, body: dict, request: Request):
             fail('账目不存在', 404)
         if entry['payer_id'] != user['id']:
             admin(user)
-        if entry['status'] not in ('draft', 'submitted', 'rejected', 'posted'):
-            fail('已审核的账目不能替换凭证', 409)
+        if entry['status'] not in ('draft', 'pending', 'posted'):
+            fail('已报销或已作废的账目不能替换凭证', 409)
         folder = config.DATA / 'receipts'
         folder.mkdir(exist_ok=True)
         filename = secrets.token_hex(24) + suffix
@@ -416,7 +416,7 @@ def export(request: Request):
     output = io.StringIO()
     output.write('\ufeff')
     writer = csv.writer(output)
-    writer.writerow(['编号', '类型', '日期', '用途', '成员', '金额（原币种）', '币种', '状态', '来源', '备注', '审核/付款备注', '付款时间'])
+    writer.writerow(['编号', '类型', '日期', '用途', '成员', '金额（原币种）', '币种', '状态', '来源', '备注', '处理/付款备注', '付款时间'])
     from decimal import Decimal
     def safe(value):
         value = str(value or '')

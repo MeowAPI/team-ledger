@@ -37,7 +37,7 @@ def new_draft(conn, user, telegram_id, chat_id, payload=None):
     conn.execute('DELETE FROM tg_drafts WHERE telegram_id=? AND chat_id=?', (telegram_id, chat_id))
     token = secrets.token_hex(5)
     step = 'confirm' if payload else 'currency'
-    payload = payload or {'kind': 'expense', 'date': config.today(), 'note': '', 'payer_id': user['id'], 'status': 'submitted'}
+    payload = payload or {'kind': 'expense', 'date': config.today(), 'note': '', 'payer_id': user['id'], 'status': 'pending'}
     conn.execute('INSERT INTO tg_drafts VALUES (?,?,?,?,?,?,?)',
                  (token, telegram_id, chat_id, user['id'], step, json.dumps(payload, ensure_ascii=False), int(time.time()) + 3600))
     return token, payload
@@ -55,9 +55,9 @@ def show_currencies(conn, chat_id, token, conf):
 
 
 def summary(conn, user, chat_id):
-    rows = conn.execute("SELECT currency,decimals,SUM(amount_minor) amount FROM entries WHERE payer_id=? AND status IN ('submitted','approved') GROUP BY currency,decimals", (user['id'],)).fetchall()
+    rows = conn.execute("SELECT currency,decimals,SUM(amount_minor) amount FROM entries WHERE payer_id=? AND status='pending' GROUP BY currency,decimals", (user['id'],)).fetchall()
     lines = [f'{r["currency"]} {Decimal(r["amount"]) / (10 ** r["decimals"]):.{r["decimals"]}f}' for r in rows]
-    say(conn, chat_id, '你的待报销金额（含待审核）：\n' + ('\n'.join(lines) if lines else '暂时没有，账目很清爽。'))
+    say(conn, chat_id, '你的待报销金额：\n' + ('\n'.join(lines) if lines else '暂时没有，账目很清爽。'))
 
 
 def handle(conn, update, ai_result=None, ai_error=None):
@@ -140,7 +140,7 @@ def handle(conn, update, ai_result=None, ai_error=None):
             # Authorization, currency precision and all fields are validated again at confirmation.
             entry = add_entry(conn, user, payload, 'telegram', f'tg:draft:{draft["token"]}')
             conn.execute('DELETE FROM tg_drafts WHERE token=?', (draft['token'],))
-            say(conn, chat_id, f'已入账 #{entry["id"]}\n{entry["description"]} · {entry["amount"]} {entry["currency"]}\n' + ('已提交报销，等待审核。' if entry['kind'] == 'expense' else '团队收入已记录。'), [[button('再记一笔', 'new'), button('我的待报销', 'summary')]])
+            say(conn, chat_id, f'已入账 #{entry["id"]}\n{entry["description"]} · {entry["amount"]} {entry["currency"]}\n' + ('已加入待报销，付款后可直接标记已报销。' if entry['kind'] == 'expense' else '团队收入已记录。'), [[button('再记一笔', 'new'), button('我的待报销', 'summary')]])
             return
         else:
             say(conn, chat_id, '请按当前步骤填写，或用 /cancel 重新开始。')
