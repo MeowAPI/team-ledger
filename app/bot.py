@@ -30,6 +30,13 @@ def process_update(update):
         draft = draft_for(conn, telegram_id, chat_id)
         accepted = accepts_text(conn, msg, telegram_id, chat_id, draft)
         codes = {r['currency'] for r in conn.execute('SELECT DISTINCT currency FROM entries')}
+        payment_code = None
+        if callback and draft:
+            parts = callback.get('data', '').split(':')
+            payload = json.loads(draft['payload'])
+            if len(parts) == 4 and parts[:3] == ['d', draft['token'], 'paycur'] and payload.get('_action') == 'pay':
+                row = conn.execute('SELECT currency FROM entries WHERE id=?', (payload['_entry_id'],)).fetchone()
+                payment_code = row['currency'] if row else None
     result, error, rates, report = None, None, None, None
     authorized = bool(linked and authorized_chat and command != 'foreign' and not sender.get('is_bot'))
     wants_ai = not callback and (command == '/ai' and bool(argument) or not command and text and accepted and (not draft or draft['step'] == 'ai_text'))
@@ -45,6 +52,10 @@ def process_update(update):
             codes.add(json.loads(draft['payload']).get('currency', conf['default_currency']))
         if result:
             codes.add(result.get('currency', conf['default_currency']))
+        if payment_code:
+            # A payment quote only needs this entry's pair. Other ledger/default
+            # currencies must not block a supported settlement-currency payment.
+            codes = {payment_code}
         callback_data = callback.get('data', '') if callback else ''
         wants_rates = callback and (callback_data.startswith(('list:', 'e:', 'd:', 'edit:')) or callback_data in ('summary', 'funds'))
         if wants_rates or command in ('/summary', '/team', '/recent', '/funds') or result or (draft and draft['step'].startswith(('edit_', 'description'))):

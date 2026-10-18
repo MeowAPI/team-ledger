@@ -220,6 +220,14 @@ class TelegramUiTest(unittest.TestCase):
         result=self.client.get('/api/entries').json()[0]
         self.assertEqual((result['reimbursed_amount'],result['payments'][0]['currency']),('10.00','USD'))
 
+    def test_settlement_quote_only_fetches_the_payment_currency_pair(self):
+        self.link_bot(); entry=self.entry(amount='100',currency='USD')
+        self.click(2,f'pay:{entry["id"]}'); token=self.draft()['token']
+        with patch('app.fx.rates_for',return_value={'base':'CNY','rates':{'USD':{'rate':'7','date':'2026-10-16'}},'missing':[],'stale':False}) as rates:
+            self.click(3,f'd:{token}:paycur:CNY')
+        self.assertEqual(rates.call_args.args,('CNY',{'USD'}))
+        self.assertEqual(self.draft()['step'],'pay_amount')
+
     def test_existing_entry_edit_detects_same_second_web_change(self):
         self.link_bot(); entry=self.entry()
         self.click(2,f'edit:{entry["id"]}'); token=self.draft()['token']
