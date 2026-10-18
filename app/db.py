@@ -40,6 +40,18 @@ CREATE TABLE IF NOT EXISTS events (
  id INTEGER PRIMARY KEY, entry_id INTEGER NOT NULL REFERENCES entries(id),
  user_id INTEGER NOT NULL REFERENCES users(id), action TEXT NOT NULL,
  detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS payments (
+ id INTEGER PRIMARY KEY, entry_id INTEGER NOT NULL REFERENCES entries(id),
+ user_id INTEGER NOT NULL REFERENCES users(id), amount_minor INTEGER NOT NULL CHECK(amount_minor>0),
+ currency TEXT NOT NULL, decimals INTEGER NOT NULL, note TEXT NOT NULL,
+ entry_amount_minor INTEGER NOT NULL, fx_rate TEXT NOT NULL, fx_date TEXT,
+ quote_id TEXT, source_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS payments_entry ON payments(entry_id,id);
+CREATE TABLE IF NOT EXISTS payment_quotes (
+ id TEXT PRIMARY KEY, entry_id INTEGER NOT NULL REFERENCES entries(id), user_id INTEGER NOT NULL REFERENCES users(id),
+ version INTEGER NOT NULL, currency TEXT NOT NULL, decimals INTEGER NOT NULL,
+ rate TEXT NOT NULL, rate_date TEXT, remaining_minor INTEGER NOT NULL, maximum_minor INTEGER NOT NULL,
+ expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS tg_links (
  telegram_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS link_codes (
@@ -85,6 +97,17 @@ def init_db():
         conn.execute('PRAGMA busy_timeout=15000')
         conn.execute('PRAGMA journal_mode=WAL')
         conn.executescript(SCHEMA)
+        # Both processes can initialize concurrently; serialize the additive migration.
+        conn.execute('BEGIN IMMEDIATE')
+        if 'reimbursed_minor' not in {r[1] for r in conn.execute('PRAGMA table_info(entries)')}:
+            conn.execute('ALTER TABLE entries ADD COLUMN reimbursed_minor INTEGER NOT NULL DEFAULT 0 CHECK(reimbursed_minor>=0 AND reimbursed_minor<=amount_minor)')
+        # Earlier versions only supported full payments. Preserve their dates and notes,
+        # and create exactly one payment record without rewriting their audit history.
+        conn.execute("""INSERT OR IGNORE INTO payments(entry_id,user_id,amount_minor,currency,decimals,note,entry_amount_minor,fx_rate,fx_date,source_key,created_at)
+            SELECT e.id,COALESCE((SELECT user_id FROM events WHERE entry_id=e.id AND action='pay' ORDER BY id DESC LIMIT 1),e.created_by),
+                e.amount_minor,e.currency,e.decimals,e.review_note,e.amount_minor,'1',NULL,'legacy:pay:'||e.id,COALESCE(e.paid_at,e.updated_at)
+            FROM entries e WHERE e.kind='expense' AND e.status='reimbursed' AND e.reimbursed_minor=0""")
+        conn.execute("UPDATE entries SET reimbursed_minor=amount_minor WHERE kind='expense' AND status='reimbursed' AND reimbursed_minor=0")
         conn.execute("UPDATE users SET role='owner' WHERE role<>'owner'")
         conn.execute("DELETE FROM settings WHERE key='categories'")
         # Retire the approval workflow without changing amounts, payment data or history.

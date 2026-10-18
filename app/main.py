@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from . import config, ai, fx
 from .db import db, init_db, settings
 from .domain import (fail, admin, owner, public_user, hash_password, verify_password,
-                     text_value, add_entry, edit_entry, transition, entry_view, audit, save_settings)
+                     text_value, add_entry, edit_entry, transition, entry_view, audit, save_settings, make_payment_quote)
 
 PUBLIC = config.ROOT / 'public'
 DUMMY_HASH = hash_password('unused-dummy-password')
@@ -280,9 +280,47 @@ def entry_action(body: dict, request: Request):
     ids = body.get('ids')
     if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or any(type(i) is not int for i in ids) or len(set(ids)) != len(ids):
         fail('请选择 1–100 笔不同账目')
+    payment_data, prefix = {}, ''
+    if body.get('action') == 'pay':
+        key = request.headers.get('idempotency-key', '')
+        if not re.fullmatch('[A-Za-z0-9_-]{16,100}', key):
+            fail('缺少付款防重复标识，请刷新页面后重试')
+        payments = body.get('payments')
+        if not isinstance(payments, list) or len(payments) != len(ids):
+            fail('请逐笔填写本次报销金额，旧页面请刷新后重试')
+        for payment in payments:
+            if not isinstance(payment, dict) or type(payment.get('id')) is not int or not isinstance(payment.get('quote_id'), str):
+                fail('付款项目格式不正确，请刷新后重试')
+            if payment['id'] in payment_data:
+                fail('付款项目不能重复')
+            payment_data[payment['id']] = payment
+        if set(payment_data) != set(ids):
+            fail('付款项目与所选账目不一致')
+        prefix = f'pay:web:{user["id"]}:{key}:'
     with db(write=True) as conn:
         # Entire batch is one transaction: a stale or unauthorized row rolls back all rows.
-        return [transition(conn, user, entry_id, body.get('action'), body.get('note', '')) for entry_id in ids]
+        if prefix:
+            previous = conn.execute('SELECT entry_id FROM payments WHERE substr(source_key,1,?)=?', (len(prefix), prefix)).fetchall()
+            if previous and {r['entry_id'] for r in previous} != set(ids):
+                fail('同一付款标识不能用于不同的付款项目', 409)
+        return [transition(conn, user, entry_id, body.get('action'), body.get('note', ''),
+                           **({'amount': payment_data[entry_id].get('amount'), 'payment_key': prefix + str(entry_id),
+                               'quote_id': payment_data[entry_id]['quote_id']} if prefix else {})) for entry_id in ids]
+
+
+@app.post('/api/entries/payment-quotes')
+def payment_quotes(body: dict, request: Request):
+    user = current(request)
+    ids = body.get('ids')
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or any(type(i) is not int for i in ids) or len(set(ids)) != len(ids):
+        fail('请选择 1–100 笔不同账目')
+    with db() as conn:
+        conf = settings(conn)
+        codes = {entry_view(conn, entry_id)['currency'] for entry_id in ids}
+    code = body.get('currency', 'original')
+    rates = fx.rates_for(conf['reference_currency'], codes) if code == conf['reference_currency'] else None
+    with db(write=True) as conn:
+        return [make_payment_quote(conn, user, entry_id, code, rates) for entry_id in ids]
 
 
 @app.get('/api/entries/{entry_id}/events')
@@ -412,19 +450,22 @@ def unlink(request: Request):
 def export(request: Request):
     current(request)
     with db() as conn:
-        rows = conn.execute('SELECT e.*,u.name payer_name FROM entries e JOIN users u ON u.id=e.payer_id ORDER BY e.date,e.id').fetchall()
+        rows = [entry_view(conn, r['id']) for r in conn.execute('SELECT id FROM entries ORDER BY date,id').fetchall()]
     output = io.StringIO()
     output.write('\ufeff')
     writer = csv.writer(output)
-    writer.writerow(['编号', '类型', '日期', '用途', '成员', '金额（原币种）', '币种', '状态', '来源', '备注', '处理/付款备注', '付款时间'])
+    writer.writerow(['编号', '类型', '日期', '用途', '成员', '金额（原币种）', '币种', '状态', '来源', '备注', '处理/付款备注', '最近付款时间', '累计已报销（原币种）', '剩余待报销（原币种）', '逐次付款明细'])
     from decimal import Decimal
     def safe(value):
         value = str(value or '')
         return "'" + value if value.lstrip().startswith(('=', '+', '-', '@', '\t', '\r')) else value
     for row in rows:
         amount = format(Decimal(row['amount_minor']) / (10 ** row['decimals']), f'.{row["decimals"]}f')
+        paid = format(Decimal(row['reimbursed_minor']) / (10 ** row['decimals']), f'.{row["decimals"]}f')
+        due = format(Decimal(row['amount_minor'] - row['reimbursed_minor']) / (10 ** row['decimals']), f'.{row["decimals"]}f') if row['kind'] == 'expense' and row['status'] == 'pending' else ''
         writer.writerow([row['id'], row['kind'], row['date'], safe(row['description']), safe(row['payer_name']),
-                         amount, row['currency'], row['status'], row['source'], safe(row['note']), safe(row['review_note']), row['paid_at']])
+                         amount, row['currency'], '部分报销' if row['status'] == 'pending' and row['reimbursed_minor'] else row['status'], row['source'], safe(row['note']), safe(row['review_note']), row['paid_at'], paid, due,
+                         safe(json.dumps(row['payments'], ensure_ascii=False)) if row['payments'] else ''])
     return StreamingResponse(iter([output.getvalue()]), media_type='text/csv; charset=utf-8',
                              headers={'Content-Disposition': 'attachment; filename="team-ledger.csv"'})
 

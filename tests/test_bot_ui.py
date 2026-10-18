@@ -31,6 +31,10 @@ class TelegramUiTest(unittest.TestCase):
         with db(write=True) as conn:
             conn.execute('DELETE FROM tg_outbox')
 
+    def prepare_payment(self, token, currency='CNY', amount='全额', start=100):
+        self.click(start,f'd:{token}:paycur:{currency}')
+        bot.process_update(self.message(start+1,amount))
+
     def click(self, update_id, data, chat=123, sender=123, private=True):
         update = self.callback(update_id, data, sender, chat)
         update['callback_query']['message'].update(message_id=77)
@@ -143,6 +147,7 @@ class TelegramUiTest(unittest.TestCase):
         self.assertEqual(self.client.get('/api/entries').json()[0]['status'],'pending')
         self.click(3,f'd:{token}:commit')
         self.assertEqual(self.client.get('/api/entries').json()[0]['status'],'pending')
+        self.prepare_payment(token)
         bot.process_update(self.message(4,'银行转账 TX42'))
         self.assertIn('不会发起转账',self.last_message()['text'])
         self.click(5,f'd:{token}:commit')
@@ -163,6 +168,57 @@ class TelegramUiTest(unittest.TestCase):
         bot.process_update(self.message(6,'重复录入'))
         self.click(7,f'd:{token}:commit')
         self.assertEqual(self.client.get('/api/entries').json()[0]['status'],'voided')
+
+    def test_partial_payment_can_use_settlement_then_original_currency(self):
+        self.link_bot(); entry=self.entry(amount='100',currency='USD')
+        self.click(2,f'pay:{entry["id"]}'); token=self.draft()['token']
+        labels=[b['text'] for row in self.last_message()['reply_markup']['inline_keyboard'] for b in row]
+        self.assertTrue(any('按记账货币 · USD' in label for label in labels))
+        self.assertTrue(any('按结算货币 · CNY' in label for label in labels))
+        self.prepare_payment(token,'CNY','280')
+        bot.process_update(self.message(3,'银行第一笔'))
+        self.assertIn('¥280.00 CNY',self.last_message()['text'])
+        self.assertIn('剩余待报：$60.00 USD',self.last_message()['text'])
+        self.click(4,f'd:{token}:commit')
+        self.assertIn('部分报销',self.last_message()['text'])
+        self.assertIn('累计已报：$40.00 USD',self.last_message()['text'])
+        self.click(5,'list:mine:0')
+        self.assertIn('合计：$60.00 USD',self.last_message()['text'])
+        self.click(6,f'pay:{entry["id"]}'); token=self.draft()['token']
+        self.prepare_payment(token,'USD','全额',start=110)
+        bot.process_update(self.message(7,'银行第二笔'))
+        self.click(8,f'd:{token}:commit')
+        result=self.client.get('/api/entries').json()[0]
+        self.assertEqual(result['status'],'reimbursed')
+        self.assertEqual([p['currency'] for p in result['payments']],['CNY','USD'])
+        self.assertEqual([p['amount'] for p in result['payments']],['280.00','60.00'])
+
+    def test_partial_payment_rejects_overpayment_and_stale_web_installment(self):
+        self.link_bot(); entry=self.entry(amount='100')
+        self.click(2,f'pay:{entry["id"]}'); token=self.draft()['token']
+        self.click(3,f'd:{token}:paycur:CNY')
+        bot.process_update(self.message(4,'100.01'))
+        self.assertEqual(self.draft()['step'],'pay_amount')
+        bot.process_update(self.message(5,'40'))
+        bot.process_update(self.message(6,'机器人付款'))
+        self.assertEqual(self.action(entry,'pay','Web 付款',amount='20').status_code,200)
+        self.click(7,f'd:{token}:commit')
+        result=self.client.get('/api/entries').json()[0]
+        self.assertEqual(result['reimbursed_amount'],'20.00')
+        self.assertEqual(len(result['payments']),1)
+
+    def test_payment_currency_and_amount_can_be_changed_before_confirmation(self):
+        self.link_bot(); entry=self.entry(amount='100',currency='USD')
+        self.click(2,f'pay:{entry["id"]}'); token=self.draft()['token']
+        self.prepare_payment(token,'CNY','280')
+        bot.process_update(self.message(3,'转账'))
+        self.click(4,f'd:{token}:paychange')
+        self.assertEqual(self.draft()['step'],'pay_currency')
+        self.prepare_payment(token,'USD','10',start=110)
+        bot.process_update(self.message(5,'实际支付美元'))
+        self.click(6,f'd:{token}:commit')
+        result=self.client.get('/api/entries').json()[0]
+        self.assertEqual((result['reimbursed_amount'],result['payments'][0]['currency']),('10.00','USD'))
 
     def test_existing_entry_edit_detects_same_second_web_change(self):
         self.link_bot(); entry=self.entry()
@@ -190,6 +246,7 @@ class TelegramUiTest(unittest.TestCase):
     def test_payment_confirmation_rejects_changed_web_amount(self):
         self.link_bot(); entry=self.entry()
         self.click(2,f'pay:{entry["id"]}'); token=self.draft()['token']
+        self.prepare_payment(token)
         bot.process_update(self.message(3,'已转账'))
         self.client.put('/api/entries/'+str(entry['id']),json={**entry,'amount':'120'},headers=self.headers)
         self.click(4,f'd:{token}:commit')
@@ -202,6 +259,7 @@ class TelegramUiTest(unittest.TestCase):
         with db(write=True) as conn:
             conn.execute('INSERT INTO tg_links VALUES (?,?)',('456',other['id']))
         self.click(2,f'pay:{entry["id"]}'); token=self.draft()['token']
+        self.prepare_payment(token)
         bot.process_update(self.message(3,'现金'))
         self.click(4,f'd:{token}:commit',sender=456)
         self.assertEqual(self.client.get('/api/entries').json()[0]['status'],'pending')
@@ -259,7 +317,7 @@ class TelegramUiTest(unittest.TestCase):
         bot.process_update(self.message(2,'/funds'))
         text=self.last_message()['text']
         self.assertIn('项目甲',text); self.assertIn('项目乙',text)
-        self.assertIn('整笔可安排',text); self.assertIn('部分预算',text)
+        self.assertIn('剩余全额可安排',text); self.assertIn('可部分报销',text)
         self.assertIn('建议 ¥5.00 CNY',text)
 
     def test_today_excludes_voided_income_and_drafts(self):

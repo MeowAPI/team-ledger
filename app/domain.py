@@ -3,8 +3,9 @@ import hashlib
 import hmac
 import re
 import secrets
+import time
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from fastapi import HTTPException
 from .config import now
 from .db import settings, set_setting
@@ -111,7 +112,19 @@ def entry_view(conn, entry_id):
     if not row:
         fail('账目不存在', 404)
     result = dict(row)
-    result['amount'] = format(Decimal(row['amount_minor']) / (10 ** row['decimals']), f'.{row["decimals"]}f')
+    def amount(units):
+        return format(Decimal(units) / (10 ** row['decimals']), f'.{row["decimals"]}f')
+    result['amount'] = amount(row['amount_minor'])
+    result['reimbursed_amount'] = amount(row['reimbursed_minor'])
+    result['remaining_minor'] = row['amount_minor'] - row['reimbursed_minor'] if row['kind'] == 'expense' else 0
+    result['remaining_amount'] = amount(result['remaining_minor'])
+    result['version'] = conn.execute('SELECT COALESCE(MAX(id),0) FROM events WHERE entry_id=?', (entry_id,)).fetchone()[0]
+    result['payments'] = []
+    for payment in conn.execute('SELECT p.*,u.name FROM payments p JOIN users u ON u.id=p.user_id WHERE entry_id=? ORDER BY p.id', (entry_id,)):
+        item = {k: payment[k] for k in ('id', 'user_id', 'name', 'currency', 'decimals', 'amount_minor', 'entry_amount_minor', 'fx_rate', 'fx_date', 'note', 'created_at')}
+        item['amount'] = format(Decimal(payment['amount_minor']) / (10 ** payment['decimals']), f'.{payment["decimals"]}f')
+        item['entry_amount'] = amount(payment['entry_amount_minor'])
+        result['payments'].append(item)
     result['receipt'] = bool(result['receipt'])
     result.pop('category', None)  # Retained database column only for compatibility with earlier local builds.
     return result
@@ -142,22 +155,94 @@ def add_entry(conn, user, body, source='web', source_key=None):
     return entry_view(conn, cursor.lastrowid)
 
 
-def transition(conn, user, entry_id, action, note=''):
+def make_payment_quote(conn, user, entry_id, code, fx=None):
+    admin(user)
+    entry, conf = entry_view(conn, entry_id), settings(conn)
+    if entry['kind'] != 'expense' or entry['status'] != 'pending':
+        fail('只有待报销账目可以登记付款', 409)
+    code = entry['currency'] if code == 'original' else code
+    if code not in (entry['currency'], conf['reference_currency']):
+        fail('请选择记账货币或团队结算货币')
+    cur = currency(conf, code)
+    rate, rate_date = Decimal(1), None
+    if code != entry['currency']:
+        row = (fx or {}).get('rates', {}).get(entry['currency'])
+        if not row or fx.get('base') != code or fx.get('stale') or fx.get('missing'):
+            fail('暂无有效汇率，不能按结算货币登记，请刷新汇率或选择记账货币')
+        rate, rate_date = Decimal(row['rate']), row['date']
+    maximum = int((Decimal(entry['remaining_minor']) / (10 ** entry['decimals']) * rate * (10 ** cur['decimals'])).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    if maximum <= 0:
+        fail('剩余金额小于该币种最小单位，请按记账货币报销')
+    token, expires = secrets.token_urlsafe(24), int(time.time()) + 1800
+    conn.execute('DELETE FROM payment_quotes WHERE expires<?', (int(time.time()) - 86400,))
+    conn.execute('INSERT INTO payment_quotes VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                 (token, entry_id, user['id'], entry['version'], code, cur['decimals'], str(rate), rate_date, entry['remaining_minor'], maximum, expires))
+    return {'id': token, 'entry_id': entry_id, 'version': entry['version'], 'currency': code, 'decimals': cur['decimals'],
+            'rate': str(rate), 'rate_date': rate_date, 'remaining_amount': entry['remaining_amount'], 'entry_currency': entry['currency'],
+            'maximum_amount': format(Decimal(maximum) / (10 ** cur['decimals']), f'.{cur["decimals"]}f'), 'expires': expires}
+
+
+def payment_preview(conn, user, entry_id, amount, quote_id):
+    entry = entry_view(conn, entry_id)
+    quote = conn.execute('SELECT * FROM payment_quotes WHERE id=? AND entry_id=? AND user_id=?', (quote_id, entry_id, user['id'])).fetchone()
+    if not quote or quote['expires'] <= time.time():
+        fail('付款换算已过期，请重新选择付款币种', 409)
+    if entry['status'] != 'pending' or entry['version'] != quote['version']:
+        fail('账目或已报销金额已变化，请刷新后核对再登记', 409)
+    units = minor_amount(amount, quote['decimals'])
+    if units > quote['maximum_minor']:
+        fail('本次报销金额不能超过所选币种的剩余待报销金额')
+    original_units = entry['remaining_minor'] if units == quote['maximum_minor'] else int((Decimal(units) / (10 ** quote['decimals']) / Decimal(quote['rate']) * (10 ** entry['decimals'])).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    if not 0 < original_units <= entry['remaining_minor']:
+        fail('折算金额小于记账货币最小单位，请调整金额或选择记账货币')
+    if original_units == entry['remaining_minor'] and units != quote['maximum_minor']:
+        fail('金额接近结清，请填写剩余全额或调低本次报销金额')
+    return entry, dict(quote), units, original_units
+
+
+def record_payment(conn, user, entry_id, amount, note, payment_key, quote_id):
+    admin(user)
+    note = text_value(note, '付款方式 / 付款参考号', 500)
+    if not isinstance(payment_key, str) or not 16 <= len(payment_key) <= 200:
+        fail('缺少有效的付款防重复标识，请刷新后重试')
+    previous = conn.execute('SELECT * FROM payments WHERE source_key=?', (payment_key,)).fetchone()
+    if previous:
+        units = minor_amount(amount, previous['decimals'])
+        if (previous['entry_id'], previous['user_id'], previous['amount_minor'], previous['note'], previous['quote_id']) != (entry_id, user['id'], units, note, quote_id):
+            fail('同一付款标识不能用于不同的付款内容', 409)
+        return entry_view(conn, entry_id)
+    entry, quote, units, original_units = payment_preview(conn, user, entry_id, amount, quote_id)
+    paid, timestamp = entry['reimbursed_minor'] + original_units, now()
+    conn.execute('INSERT INTO payments(entry_id,user_id,amount_minor,currency,decimals,note,entry_amount_minor,fx_rate,fx_date,quote_id,source_key,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                 (entry_id, user['id'], units, quote['currency'], quote['decimals'], note, original_units, quote['rate'], quote['rate_date'], quote_id, payment_key, timestamp))
+    conn.execute('UPDATE entries SET reimbursed_minor=?,status=?,review_note=?,paid_at=?,updated_at=? WHERE id=?',
+                 (paid, 'reimbursed' if paid == entry['amount_minor'] else 'pending', note, timestamp, timestamp, entry_id))
+    actual = format(Decimal(units) / (10 ** quote['decimals']), f'.{quote["decimals"]}f')
+    allocation = format(Decimal(original_units) / (10 ** entry['decimals']), f'.{entry["decimals"]}f')
+    detail = f'本次报销 {actual} {quote["currency"]}'
+    if quote['currency'] != entry['currency']:
+        detail += f'，抵扣 {allocation} {entry["currency"]}（1 {entry["currency"]} = {quote["rate"]} {quote["currency"]} · {quote["rate_date"]}）'
+    audit(conn, entry_id, user['id'], 'pay', detail + ' · ' + note)
+    return entry_view(conn, entry_id)
+
+
+def transition(conn, user, entry_id, action, note='', *, amount=None, payment_key=None, quote_id=None):
     entry = entry_view(conn, entry_id)
     if action == 'void':
         if entry['kind'] == 'income' or entry['payer_id'] != user['id']:
             admin(user)
-        if entry['status'] in ('reimbursed', 'voided'):
-            fail('已报销或已作废账目不能再次作废', 409)
+        if entry['reimbursed_minor'] or entry['status'] in ('reimbursed', 'voided'):
+            fail('已有报销记录或已作废的账目不能作废', 409)
         note = text_value(note, '作废原因', 500)
         conn.execute('UPDATE entries SET status=?,review_note=?,updated_at=? WHERE id=?', ('voided', note, now(), entry_id))
         audit(conn, entry_id, user['id'], 'void', note)
         return entry_view(conn, entry_id)
     if entry['kind'] != 'expense':
         fail('收入无需报销')
+    if action == 'pay':
+        return record_payment(conn, user, entry_id, amount, note, payment_key, quote_id)
     note = text_value(note, '处理备注', 500, False)
-    transitions = {'submit': (('draft',), 'pending'),
-                   'pay': (('pending',), 'reimbursed')}
+    transitions = {'submit': (('draft',), 'pending')}
     if action not in transitions:
         fail('操作不正确')
     if action == 'submit':
@@ -168,19 +253,16 @@ def transition(conn, user, entry_id, action, note=''):
     allowed, target = transitions[action]
     if entry['status'] not in allowed:
         fail('账目状态已变化，请刷新后重试', 409)
-    if action == 'pay' and not note:
-        fail('请填写付款方式或付款参考号')
-    paid_at = now() if action == 'pay' else None
     conn.execute('UPDATE entries SET status=?,review_note=?,paid_at=?,updated_at=? WHERE id=?',
-                 (target, note, paid_at, now(), entry_id))
+                 (target, note, None, now(), entry_id))
     audit(conn, entry_id, user['id'], action, note)
     return entry_view(conn, entry_id)
 
 
 def edit_entry(conn, user, entry_id, body):
     old = entry_view(conn, entry_id)
-    if old['kind'] != 'expense' or old['status'] not in ('draft', 'pending'):
-        fail('仅草稿或待报销支出可以修改', 409)
+    if old['kind'] != 'expense' or old['status'] not in ('draft', 'pending') or old['reimbursed_minor']:
+        fail('仅没有报销记录的草稿或待报销支出可以修改', 409)
     if old['payer_id'] != user['id']:
         admin(user)
     data = normalized_entry(conn, user, body)
@@ -208,13 +290,13 @@ def save_settings(conn, user, body):
         decimals = cur.get('decimals', 2)
         if type(decimals) is not int or decimals not in (0, 2, 3, 4) or code in codes:
             fail('币种不能重复，小数位支持 0、2、3、4')
-        used = conn.execute('SELECT decimals FROM entries WHERE currency=? LIMIT 1', (code,)).fetchone()
+        used = conn.execute('SELECT decimals FROM entries WHERE currency=? UNION ALL SELECT decimals FROM payments WHERE currency=? LIMIT 1', (code, code)).fetchone()
         if used and used['decimals'] != decimals:
             fail(f'{code} 已有账目，不能修改其小数位')
         codes.add(code)
         clean.append({'code': code, 'decimals': decimals, 'name': text_value(cur.get('name', code), '币种名称', 20),
                       'symbol': text_value(cur.get('symbol', code), '货币符号', 8)})
-    for row in conn.execute('SELECT DISTINCT currency FROM entries'):
+    for row in conn.execute('SELECT currency FROM entries UNION SELECT currency FROM payments'):
         if row['currency'] not in codes:
             fail(f'{row["currency"]} 已有账目，不能移除')
     default = body.get('default_currency', conf['default_currency'])

@@ -61,7 +61,7 @@ def rates_for(base, codes, force=False):
     return result
 
 
-def calculate(entries, conf, fx, scenario=None):
+def calculate(entries, conf, fx, scenario=None, payments=None):
     base = fx['base']
     base_decimals = currency(conf, base)['decimals']
     quantum = Decimal(1).scaleb(-base_decimals)
@@ -69,24 +69,23 @@ def calculate(entries, conf, fx, scenario=None):
     def formatted(value):
         return format(value.quantize(quantum, rounding=ROUND_HALF_UP), f'.{base_decimals}f')
 
-    def convert(entry):
-        return Decimal(entry['amount_minor']) / (10 ** entry['decimals']) * Decimal(fx['rates'][entry['currency']]['rate'])
+    def convert(entry, units=None):
+        return Decimal(entry['amount_minor'] if units is None else units) / (10 ** entry['decimals']) * Decimal(fx['rates'][entry['currency']]['rate'])
 
+    payments = payments or []
     balances = {}
-    for entry in entries:
-        if (entry['kind'] == 'income' and entry['status'] == 'posted') or entry['status'] == 'reimbursed':
-            factor = 1 if entry['kind'] == 'income' else -1
-            key = entry['currency']
-            balances[key] = balances.get(key, Decimal(0)) + factor * Decimal(entry['amount_minor']) / (10 ** entry['decimals'])
+    for entry, factor in [(e, 1) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'] + [(p, -1) for p in payments]:
+        key = entry['currency']
+        balances[key] = balances.get(key, Decimal(0)) + factor * Decimal(entry['amount_minor']) / (10 ** entry['decimals'])
     common = {'base': base, 'fx': fx, 'balances': {k: str(v) for k, v in balances.items()},
               'complete': not fx['missing'], 'scenario': scenario, 'members': []}
     if fx['missing']:
         return common
     income = sum((convert(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'), Decimal(0))
     today_income = sum((convert(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted' and e['date'] == today()), Decimal(0))
-    paid = sum((convert(e) for e in entries if e['status'] == 'reimbursed'), Decimal(0))
+    paid = sum((convert(p) for p in payments), Decimal(0))
     due_entries = sorted((e for e in entries if e['status'] == 'pending'), key=lambda e: (e['date'], e['id']))
-    due = sum((convert(e) for e in due_entries), Decimal(0))
+    due = sum((convert(e, e['amount_minor'] - e['reimbursed_minor']) for e in due_entries), Decimal(0))
     extra = Decimal(0)
     if scenario:
         cur = currency(conf, scenario['currency'])
@@ -103,18 +102,20 @@ def calculate(entries, conf, fx, scenario=None):
         key = entry['payer_id']
         if key not in groups:
             groups[key] = {'id': key, 'name': entry['payer_name'], 'due': Decimal(0), 'suggested': Decimal(0), 'entries': []}
-        amount = convert(entry)
+        amount = convert(entry, entry['amount_minor'] - entry['reimbursed_minor'])
         groups[key]['due'] += amount
         portion = min(left, amount)
         groups[key]['suggested'] += portion
         left -= portion
-        original = Decimal(entry['amount_minor']) / (10 ** entry['decimals'])
+        original = Decimal(entry['amount_minor'] - entry['reimbursed_minor']) / (10 ** entry['decimals'])
         groups[key]['entries'].append({
             'id': entry['id'],
             'description': entry['description'],
             'date': entry['date'],
             'currency': entry['currency'],
             'amount': format(original, f'.{entry["decimals"]}f'),
+            'original_amount': format(Decimal(entry['amount_minor']) / (10 ** entry['decimals']), f'.{entry["decimals"]}f'),
+            'reimbursed_amount': format(Decimal(entry['reimbursed_minor']) / (10 ** entry['decimals']), f'.{entry["decimals"]}f'),
             'settlement': formatted(amount),
             'suggested': formatted(portion),
             'fully_covered': portion >= amount,
@@ -131,10 +132,12 @@ def report(base=None, scenario=None, force=False):
         base = base or conf['reference_currency']
         currency(conf, base)
         entries = [dict(e) for e in conn.execute('SELECT e.*,u.name payer_name FROM entries e JOIN users u ON u.id=e.payer_id')]
+        payments = [dict(p) for p in conn.execute('SELECT * FROM payments')]
     # Ignore drafts and voided entries when looking up rates.
     codes = {e['currency'] for e in entries if (e['kind'] == 'income' and e['status'] == 'posted') or e['status'] in ('pending', 'reimbursed')}
+    codes.update(p['currency'] for p in payments)
     if scenario:
         currency(conf, scenario['currency'])
         minor_amount(scenario['amount'], currency(conf, scenario['currency'])['decimals'])
         codes.add(scenario['currency'])
-    return calculate(entries, conf, rates_for(base, codes, force), scenario)
+    return calculate(entries, conf, rates_for(base, codes, force), scenario, payments)

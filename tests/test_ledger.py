@@ -54,7 +54,15 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
-    def action(self, entry, action, note=''):
+    def action(self, entry, action, note='', amount=None, currency='original'):
+        if action == 'pay':
+            quoted = self.post('/entries/payment-quotes', {'ids':[entry['id']], 'currency':currency})
+            if quoted.status_code != 200:
+                return quoted
+            quote = quoted.json()[0]
+            return self.client.post('/api/entries/action', json={'ids':[entry['id']], 'action':'pay', 'note':note,
+                'payments':[{'id':entry['id'], 'amount':amount if amount is not None else quote['maximum_amount'], 'quote_id':quote['id']}]},
+                headers={**self.headers,'Idempotency-Key':secrets.token_hex(16)})
         return self.post('/entries/action', {'ids':[entry['id']], 'action':action, 'note':note})
 
     def new_member(self):
@@ -153,9 +161,13 @@ class LedgerTest(unittest.TestCase):
 
     def test_batch_action_rolls_back_on_stale_row(self):
         a=self.entry()
-        b=self.entry(kind='income')
-        result=self.post('/entries/action',{'ids':[a['id'],b['id']],'action':'pay','note':'批量付款'})
-        self.assertEqual(result.status_code,400)
+        b=self.entry()
+        quotes=self.post('/entries/payment-quotes',{'ids':[a['id'],b['id']]}).json()
+        self.action(b,'void','重复')
+        result=self.client.post('/api/entries/action',json={'ids':[a['id'],b['id']],'action':'pay','note':'批量付款',
+            'payments':[{'id':q['entry_id'],'amount':q['maximum_amount'],'quote_id':q['id']} for q in quotes]},
+            headers={**self.headers,'Idempotency-Key':'batch-rollback-123456'})
+        self.assertEqual(result.status_code,409)
         entries=self.client.get('/api/entries').json()
         self.assertEqual(next(e for e in entries if e['id']==a['id'])['status'],'pending')
         self.assertEqual(len(self.client.get(f'/api/entries/{a["id"]}/events').json()),1)

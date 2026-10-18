@@ -26,7 +26,8 @@ const paths = {
 };
 const icon = name => `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[name] || paths.book}"/></svg>`;
 const PAGES = {overview:['团队总览','overview','grid'],ledger:['收支明细','ledger','book'],reimbursements:['报销管理','reimbursements','wallet'],calculator:['资金计算','calculator','calc'],members:['团队成员','members','users'],integrations:['机器人与 AI','integrations','send'],settings:['团队设置','settings','settings']};
-const STATUS = {draft:'草稿',pending:'待报销',reimbursed:'已报销',posted:'已入账',voided:'已作废'};
+const STATUS = {draft:'草稿',pending:'待报销',partial:'部分报销',reimbursed:'已报销',posted:'已入账',voided:'已作废'};
+const entryStatus = e => e.status==='pending'&&e.reimbursed_minor>0?'partial':e.status;
 const ROLES = {owner:'团队成员 · 共同管理',finance:'团队成员 · 共同管理',member:'团队成员 · 共同管理'};
 const COLORS = ['green','orange','blue','purple'];
 const state = {user:null,csrf:'',conf:null,members:[],entries:[],integrations:{},report:null,page:'overview',
@@ -82,10 +83,18 @@ function baseSelect() {return `<select id="report-base" aria-label="汇总参考
 function entryIcon(entry) {
   return `<span class="entry-type-icon ${entry.kind==='income'?'income':''}">${icon(entry.kind==='income'?'down':'receipt')}</span>`;
 }
-function groupedTotals(entries) {
+function groupedTotals(entries,field='amount') {
   const sums={};
-  for (const e of entries) sums[e.currency]=(sums[e.currency] || 0)+Number(e.amount);
+  for (const e of entries) sums[e.currency]=(sums[e.currency] || 0)+Number(e[field]);
   return Object.entries(sums).map(([code,amount])=>money(amount,code)).join(' <span class="muted"> / </span> ') || '—';
+}
+function paymentSummary(e) {
+  if(e.kind!=='expense'||!e.reimbursed_minor)return '';
+  return `<span class="payment-progress">已报 ${money(e.reimbursed_amount,e.currency)}<br>剩余 ${money(e.remaining_amount,e.currency)}${settlementDisplay({...e,amount:e.remaining_amount})}</span>`;
+}
+function paymentHistory(e) {
+  if(!e.payments?.length)return '';
+  return `<h3>逐次报销记录</h3><div class="timeline">${e.payments.map(p=>`<div class="timeline-item"><strong>实际付款 ${money(p.amount,p.currency)}</strong><br>抵扣记账金额 ${money(p.entry_amount,e.currency)}${p.currency!==e.currency?`<br>汇率：1 ${esc(e.currency)} = ${esc(p.fx_rate)} ${esc(p.currency)} · ${esc(p.fx_date)}`:''}<br>${esc(p.name)} · ${esc(p.note)}<small>${esc(p.created_at.replace('T',' ').slice(0,19))}</small></div>`).join('')}</div>`;
 }
 function settlementDisplay(entry, report=state.report) {
   const base=report?.base;
@@ -97,7 +106,7 @@ function settlementDisplay(entry, report=state.report) {
 }
 function table(entries,{checkbox=false}={}) {
   if (!entries.length) return empty('还没有符合条件的账目','调整筛选条件，或记下新的一笔。',newButton());
-  return `<div class="table-wrap"><table class="data-table"><thead><tr>${checkbox?'<th class="check-cell"><input type="checkbox" id="select-all" aria-label="选择本页全部账目"></th>':''}<th>用途 / 说明</th><th>成员</th><th>日期</th><th class="money">金额</th><th>状态</th><th>来源</th><th></th></tr></thead><tbody>${entries.map(e=>`<tr data-entry="${e.id}" tabindex="0" aria-label="查看 ${esc(e.description)}">${checkbox?`<td class="check-cell"><input type="checkbox" data-select="${e.id}" ${state.selected.has(e.id)?'checked':''} aria-label="选择 ${esc(e.description)}"></td>`:''}<td><div class="entry-cell">${entryIcon(e)}<div><strong>${esc(e.description)}</strong><span class="subline">${e.kind==='income'?'团队收入':'成员垫付'}${e.receipt?' · 已附凭证':''}</span></div></div></td><td>${esc(e.payer_name)}</td><td>${esc(e.date.slice(5).replace('-',' / '))}<span class="subline">${esc(e.date.slice(0,4))}</span></td><td class="money ${e.kind==='income'?'income':''}"><strong>${e.kind==='income'?'+':'−'} ${money(e.amount,e.currency,false)}</strong><span class="subline">${esc(e.currency)}</span>${settlementDisplay(e)}</td><td>${badge(e.status)}</td><td><span class="row-source">${e.source==='telegram'?'↗ Telegram':'▣ Web'}</span></td><td>↗</td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="table-wrap"><table class="data-table"><thead><tr>${checkbox?'<th class="check-cell"><input type="checkbox" id="select-all" aria-label="选择本页全部账目"></th>':''}<th>用途 / 说明</th><th>成员</th><th>日期</th><th class="money">金额</th><th>状态</th><th>来源</th><th></th></tr></thead><tbody>${entries.map(e=>`<tr data-entry="${e.id}" tabindex="0" aria-label="查看 ${esc(e.description)}">${checkbox?`<td class="check-cell"><input type="checkbox" data-select="${e.id}" ${state.selected.has(e.id)?'checked':''} aria-label="选择 ${esc(e.description)}"></td>`:''}<td><div class="entry-cell">${entryIcon(e)}<div><strong>${esc(e.description)}</strong><span class="subline">${e.kind==='income'?'团队收入':'成员垫付'}${e.receipt?' · 已附凭证':''}</span></div></div></td><td>${esc(e.payer_name)}</td><td>${esc(e.date.slice(5).replace('-',' / '))}<span class="subline">${esc(e.date.slice(0,4))}</span></td><td class="money ${e.kind==='income'?'income':''}"><strong>${e.kind==='income'?'+':'−'} ${money(e.amount,e.currency,false)}</strong><span class="subline">${esc(e.currency)}</span>${settlementDisplay(e)}${paymentSummary(e)}</td><td>${badge(entryStatus(e))}</td><td><span class="row-source">${e.source==='telegram'?'↗ Telegram':'▣ Web'}</span></td><td>↗</td></tr>`).join('')}</tbody></table></div>`;
 }
 function reportWarning(report=state.report) {
   if (!report) return `<div class="callout warning">${icon('info')}<span>资金计算暂不可用，请刷新重试。原币种收支仍可查看。</span></div>`;
@@ -110,7 +119,7 @@ function aiComposer() {
 function rateDetails(report=state.report) {
   if (!report) return '';
   const rows=Object.entries(report.fx.rates).filter(([code])=>code!==report.base);
-  return `<div class="rates">${rows.map(([code,r])=>`<span class="rate-chip">1 ${esc(code)} ≈ ${Number(r.rate).toLocaleString('zh-CN',{maximumFractionDigits:6})} ${esc(report.base)} · ${esc(r.date)}</span>`).join('')}</div><p class="fx-caption">${rows.length?`${esc(report.fx.source)}${report.fx.stale?' · 缓存已过期，获取失败后沿用':''}。周末、节假日可能返回最近工作日。`:'当前账目无需跨币种换算。'}换算仅供资金规划；实际付款按原币种登记，平台不会自动转账。</p>`;
+  return `<div class="rates">${rows.map(([code,r])=>`<span class="rate-chip">1 ${esc(code)} ≈ ${Number(r.rate).toLocaleString('zh-CN',{maximumFractionDigits:6})} ${esc(report.base)} · ${esc(r.date)}</span>`).join('')}</div><p class="fx-caption">${rows.length?`${esc(report.fx.source)}${report.fx.stale?' · 缓存已过期，获取失败后沿用':''}。周末、节假日可能返回最近工作日。`:'当前账目无需跨币种换算。'}换算仅供资金规划；付款可选记账货币或团队结算货币，平台不会自动转账。</p>`;
 }
 function converted(entry,report=state.report) {
   const r=report?.fx.rates[entry.currency];return r?Number(entry.amount)*Number(r.rate):0;
@@ -123,7 +132,7 @@ function chart() {
     const d=new Date(state.conf.today+'T12:00:00Z');d.setUTCDate(d.getUTCDate()-i);
     const date=d.toISOString().slice(0,10);
     const income=state.entries.filter(e=>e.kind==='income'&&e.status==='posted'&&e.date===date).reduce((s,e)=>s+converted(e),0);
-    const paid=state.entries.filter(e=>e.status==='reimbursed'&&e.paid_at?.slice(0,10)===date).reduce((s,e)=>s+converted(e),0);
+    const paid=state.entries.reduce((s,e)=>s+(e.payments||[]).filter(p=>p.created_at.slice(0,10)===date).reduce((sum,p)=>sum+converted(p),0),0);
     days.push({date,income,paid});
   }
   const max=Math.max(1,...days.flatMap(d=>[d.income,d.paid]));
@@ -146,7 +155,7 @@ function filteredEntries() {
   const f=state.filter;
   return state.entries.filter(e=>(!f.text||[e.description,e.note,e.payer_name].join(' ').toLowerCase().includes(f.text.toLowerCase())) &&
     (f.kind==='all'||e.kind===f.kind)&&(f.currency==='all'||e.currency===f.currency)&&(f.payer==='all'||e.payer_id===Number(f.payer))&&
-    (f.status==='all'||e.status===f.status)&&(!f.from||e.date>=f.from)&&(!f.to||e.date<=f.to));
+    (f.status==='all'||(f.status==='partial'?entryStatus(e)==='partial':e.status===f.status))&&(!f.from||e.date>=f.from)&&(!f.to||e.date<=f.to));
 }
 function ledgerResults() {
   const rows=filteredEntries();
@@ -172,7 +181,7 @@ function renderReimbursements() {
   const rows=reimbursementRows();
   const selectable=['pending','draft'].includes(state.reimburseTab);
   return heading('让垫付，及时有回音。','记一笔 → 待报销 → 登记已付款。每次操作都有记录。','LESS WAITING, MORE DOING',newButton())+
-    `<div class="reimbursement-summary"><div class="mini-stat"><small>全部待报销 · 参考换算</small><strong>${metric('due')}</strong></div><div class="mini-stat"><small>当前可安排报销资金</small><strong>${metric('payable')}</strong></div><div class="mini-stat"><small>累计已报销</small><strong>${metric('paid')}</strong></div></div>${reportWarning()}<section class="panel"><div class="filter-tabs">${['pending','reimbursed','draft','voided'].map(s=>`<button data-reimburse-tab="${s}" class="${state.reimburseTab===s?'active':''}">${STATUS[s]}<small>${state.entries.filter(e=>e.kind==='expense'&&e.status===s).length}</small></button>`).join('')}</div><div id="reimbursement-results">${table(rows,{checkbox:selectable})}</div>${rows.length&&selectable?`<div class="batch-toolbar" id="batch-toolbar">${batchToolbar()}</div>`:''}</section><div class="notice">每笔垫付记账后直接进入待报销。每位成员都可登记付款；请在实际转账完成后标记已报销。报销按每笔原币种登记，换算结果用于规划。</div>`;
+    `<div class="reimbursement-summary"><div class="mini-stat"><small>全部待报销 · 参考换算</small><strong>${metric('due')}</strong></div><div class="mini-stat"><small>当前可安排报销资金</small><strong>${metric('payable')}</strong></div><div class="mini-stat"><small>累计已报销</small><strong>${metric('paid')}</strong></div></div>${reportWarning()}<section class="panel"><div class="filter-tabs">${['pending','reimbursed','draft','voided'].map(s=>`<button data-reimburse-tab="${s}" class="${state.reimburseTab===s?'active':''}">${STATUS[s]}<small>${state.entries.filter(e=>e.kind==='expense'&&e.status===s).length}</small></button>`).join('')}</div><div id="reimbursement-results">${table(rows,{checkbox:selectable})}</div>${rows.length&&selectable?`<div class="batch-toolbar" id="batch-toolbar">${batchToolbar()}</div>`:''}</section><div class="notice">每笔垫付记账后直接进入待报销。每位成员都可登记付款；请在实际转账完成后标记已报销。支持部分报销，可按记账货币或团队结算货币填写本次金额；待报销列表包含尚未结清的部分报销。</div>`;
 }
 function calcSummary(report,scenario=false) {
   if (!report?.complete) return `<div class="calc-summary"><span class="eyebrow">REIMBURSE FIRST</span><div class="calc-amount">等待汇率</div><p>原币种账目已保留，缺少可靠汇率时暂停合并计算。</p></div>${reportWarning(report)}`;
@@ -187,18 +196,18 @@ function planTable(report) {
     const status=hasSuggestion?(full?'建议付款':'部分安排'):'暂不安排';
     const original=money(entry.amount,entry.currency,false);
     const converted=entry.currency===report.base?'':` · 结算参考 ${money(entry.settlement,report.base,false)}`;
-    return `<div class="plan-entry ${hasSuggestion?'is-selected':'is-waiting'}"><div class="plan-entry-main"><span class="plan-entry-status">${status}</span><strong>${esc(entry.description)}</strong><small>${esc(entry.date)} · 原币 ${original}${converted}</small></div><div class="plan-entry-suggested">${hasSuggestion?`建议 ${money(entry.suggested,report.base,false)}`:'—'}</div></div>`;
+    return `<div class="plan-entry ${hasSuggestion?'is-selected':'is-waiting'}"><div class="plan-entry-main"><span class="plan-entry-status">${status}</span><strong>${esc(entry.description)}</strong><small>${esc(entry.date)} · 剩余待报 ${original}${converted}${Number(entry.reimbursed_amount)>0?` · 原金额 ${money(entry.original_amount,entry.currency,false)} · 已报 ${money(entry.reimbursed_amount,entry.currency,false)}`:``}</small></div><div class="plan-entry-suggested">${hasSuggestion?`建议 ${money(entry.suggested,report.base,false)}`:'—'}</div></div>`;
   };
   return `<div class="table-wrap"><table class="data-table plan-table"><thead><tr><th>成员 / 具体项目</th><th class="money">全部待报销</th><th class="money">建议安排付款</th></tr></thead><tbody>${report.members.map(m=>`<tr><td><strong>${esc(m.name)}</strong><div class="plan-entry-list">${m.entries.map(entryLabel).join('')}</div></td><td class="money">${money(m.due,report.base,false)}</td><td class="money"><strong>${money(m.suggested,report.base,false)}</strong><small class="subline">按项目明细安排</small></td></tr>`).join('')}</tbody></table></div>`;
 }
 function renderCalculator() {
   const r=state.report;
   return heading('这笔进账，能报多少？','先把伙伴们的垫付安排好，再看团队还剩多少。','REIMBURSE FIRST, THEN THE REST',baseSelect())+
-    `<div class="calculator-grid"><section class="panel"><div class="panel-inner"><h2>新进账，先算一算</h2><p class="calculator-intro">把本次新增收入放进当前账本，预演报销和结余。这里的输入不会自动入账。</p><form id="calculator-form"><div class="form-grid"><label>本次新增进账<input name="amount" inputmode="decimal" placeholder="例如：1000.00" required></label><label>收入币种<select name="currency">${currencyOptions(state.conf.default_currency)}</select></label></div><button class="btn primary wide" type="submit">${icon('calc')}计算能报多少</button><div class="form-error" id="calculator-error"></div></form><div class="notice"><strong>默认规则：优先覆盖全部待报销。</strong><p>资金不足时显示缺口；资金充足时显示预留报销后的结余。全部待报销账目均可安排付款，按最早发生日期优先安排。</p><p>若建议金额小于某笔报销金额，只代表资金规划；系统不支持把同一笔账标记为部分付款。</p></div>${canManage()?'<button class="btn wide" data-new="income">＋ 把真实进账记入账本</button>':''}</div></section><section id="calculator-result">${calcSummary(r)}</section></div><section class="panel recent-panel"><div class="panel-heading"><div><h3>伙伴们的报销安排</h3><p>统一按 ${esc(r?.base||state.conf.reference_currency)} 参考换算 · 实际转账仍按原币种</p></div><a class="tiny-link" href="#reimbursements">处理报销 ↗</a></div><div id="plan-table">${planTable(r)}</div></section><section class="panel recent-panel"><div class="panel-inner"><div class="page-subheading"><h3>本次换算依据</h3><button class="btn small" id="refresh-fx">刷新汇率 ↻</button></div><div id="fx-details">${rateDetails(r)}${reportWarning(r)}</div><p class="fx-caption">当前各币种资金余额：${r?Object.entries(r.balances).map(([c,a])=>`${esc(c)} ${esc(a)}`).join(' · ')||'尚无收入或报销付款':'—'}。不同币种账户之间是否实际换汇，需要团队自行确认。</p></div></section>`;
+    `<div class="calculator-grid"><section class="panel"><div class="panel-inner"><h2>新进账，先算一算</h2><p class="calculator-intro">把本次新增收入放进当前账本，预演报销和结余。这里的输入不会自动入账。</p><form id="calculator-form"><div class="form-grid"><label>本次新增进账<input name="amount" inputmode="decimal" placeholder="例如：1000.00" required></label><label>收入币种<select name="currency">${currencyOptions(state.conf.default_currency)}</select></label></div><button class="btn primary wide" type="submit">${icon('calc')}计算能报多少</button><div class="form-error" id="calculator-error"></div></form><div class="notice"><strong>默认规则：优先覆盖全部待报销。</strong><p>资金不足时显示缺口；资金充足时显示预留报销后的结余。全部待报销账目均可安排付款，按最早发生日期优先安排。</p><p>支持分次报销：实际转账后，在报销管理填写本次已报销金额，可选择记账货币或团队结算货币。建议金额仅用于规划，不会自动付款。</p></div>${canManage()?'<button class="btn wide" data-new="income">＋ 把真实进账记入账本</button>':''}</div></section><section id="calculator-result">${calcSummary(r)}</section></div><section class="panel recent-panel"><div class="panel-heading"><div><h3>伙伴们的报销安排</h3><p>统一按 ${esc(r?.base||state.conf.reference_currency)} 参考换算 · 付款可选记账货币或结算货币</p></div><a class="tiny-link" href="#reimbursements">处理报销 ↗</a></div><div id="plan-table">${planTable(r)}</div></section><section class="panel recent-panel"><div class="panel-inner"><div class="page-subheading"><h3>本次换算依据</h3><button class="btn small" id="refresh-fx">刷新汇率 ↻</button></div><div id="fx-details">${rateDetails(r)}${reportWarning(r)}</div><p class="fx-caption">当前各币种资金余额：${r?Object.entries(r.balances).map(([c,a])=>`${esc(c)} ${esc(a)}`).join(' · ')||'尚无收入或报销付款':'—'}。不同币种账户之间是否实际换汇，需要团队自行确认。</p></div></section>`;
 }
 function renderMembers() {
   return heading('一起做事的伙伴。','每人一个账号，垫付归属清晰，协作更轻松。','GOOD TEAMS, CLEAR BOOKS',isOwner()?'<button class="btn primary" id="add-member">＋ 邀请新伙伴</button>':'')+
-    `<div class="members-grid">${state.members.map(m=>`<section class="person-card ${m.active?'':'inactive'}"><div class="person-card-top">${avatar(m.name,m.id)}<div><h3>${esc(m.name)}${m.id===state.user.id?' · 我':''}</h3><p class="muted">@${esc(m.username)}</p></div></div><hr><div class="person-detail"><span>账本权限</span><strong>${m.active?'共同管理':'已停用'}</strong></div><div class="person-detail"><span>Telegram</span><strong>${m.telegram_linked?'已绑定':'未绑定'}</strong></div><div class="person-detail"><span>待报销 · 原币种</span><strong>${groupedTotals(state.entries.filter(e=>e.payer_id===m.id&&e.status==='pending'))}</strong></div><div class="person-actions"><button class="btn small" data-reset-password="${m.id}">重置密码</button><button class="btn small" data-toggle-member="${m.id}">${m.active?'停用账号':'启用账号'}</button></div></section>`).join('')}</div><div class="notice">扁平化团队，每位启用的成员拥有相同管理权限：记账、登记收入、报销付款、管理成员和设置。独立账号与操作记录，帮助大家追溯每一笔。</div>`;
+    `<div class="members-grid">${state.members.map(m=>`<section class="person-card ${m.active?'':'inactive'}"><div class="person-card-top">${avatar(m.name,m.id)}<div><h3>${esc(m.name)}${m.id===state.user.id?' · 我':''}</h3><p class="muted">@${esc(m.username)}</p></div></div><hr><div class="person-detail"><span>账本权限</span><strong>${m.active?'共同管理':'已停用'}</strong></div><div class="person-detail"><span>Telegram</span><strong>${m.telegram_linked?'已绑定':'未绑定'}</strong></div><div class="person-detail"><span>待报销 · 原币种</span><strong>${groupedTotals(state.entries.filter(e=>e.payer_id===m.id&&e.status==='pending'),'remaining_amount')}</strong></div><div class="person-actions"><button class="btn small" data-reset-password="${m.id}">重置密码</button><button class="btn small" data-toggle-member="${m.id}">${m.active?'停用账号':'启用账号'}</button></div></section>`).join('')}</div><div class="notice">扁平化团队，每位启用的成员拥有相同管理权限：记账、登记收入、报销付款、管理成员和设置。独立账号与操作记录，帮助大家追溯每一笔。</div>`;
 }
 function renderIntegrations() {
   const i=state.integrations;
@@ -305,24 +314,51 @@ async function openDetail(id) {
     const events=await api(`/entries/${id}/events`);
     const mine=e.payer_id===state.user.id||canManage();
     const actions=[];
-    if(mine&&['draft','pending'].includes(e.status))actions.push(`<button class="btn" data-edit-entry="${id}">修改账目</button>`);
+    if(mine&&!e.reimbursed_minor&&['draft','pending'].includes(e.status))actions.push(`<button class="btn" data-edit-entry="${id}">修改账目</button>`);
     if(mine&&e.status==='draft')actions.push(`<button class="btn primary" data-action="submit" data-id="${id}">记入账本</button>`);
     if(canManage()&&e.status==='pending')actions.push(`<button class="btn primary" data-action="pay" data-id="${id}">登记已付款</button>`);
-    if(!['reimbursed','voided'].includes(e.status)&&mine)actions.push(`<button class="btn danger" data-action="void" data-id="${id}">作废账目</button>`);
+    if(!e.reimbursed_minor&&!['reimbursed','voided'].includes(e.status)&&mine)actions.push(`<button class="btn danger" data-action="void" data-id="${id}">作废账目</button>`);
     const actionNames={created:'创建了账目',submit:'将草稿记入账本',approve:'历史记录：通过',reject:'历史记录：退回',pay:'登记了报销付款',edited:'修改了账目',receipt:'上传了凭证',void:'作废了账目'};
-    $('#detail-content').innerHTML=`<div class="modal-heading"><div><span class="eyebrow">ENTRY #${e.id}</span><h2>账目详情</h2></div><button class="icon-button" data-close aria-label="关闭">✕</button></div><div class="detail-hero">${entryIcon(e)}<div><h2>${e.kind==='income'?'+':'−'} ${money(e.amount,e.currency)}</h2>${settlementDisplay(e)}<p>${esc(e.description)}</p></div></div>${badge(e.status)}<dl class="detail-list"><div><dt>${e.kind==='income'?'经手成员':'垫付成员'}</dt><dd>${esc(e.payer_name)}</dd></div><div><dt>发生日期</dt><dd>${esc(e.date)}</dd></div><div><dt>记录来源</dt><dd>${esc(e.source)} · ${esc(e.creator_name)}</dd></div><div class="full-span"><dt>备注</dt><dd>${esc(e.note||'—')}</dd></div>${e.review_note?`<div class="full-span"><dt>处理 / 付款备注</dt><dd>${esc(e.review_note)}</dd></div>`:''}<div class="full-span"><dt>凭证</dt><dd>${e.receipt?`<a class="tiny-link" href="/api/entries/${id}/receipt" target="_blank" rel="noreferrer">下载 ${esc(e.receipt_name)} ↗</a>`:'未附凭证'}</dd></div></dl>${mine&&['draft','pending','posted'].includes(e.status)?`<label class="upload-zone"><input type="file" id="detail-receipt" data-id="${id}" accept="image/png,image/jpeg,application/pdf"><span>＋ ${e.receipt?'替换':'补充'}凭证 <small>PNG / JPG / PDF，最多 6 MB</small></span></label>`:''}<h3>操作记录</h3><div class="timeline">${events.map(event=>`<div class="timeline-item">${esc(event.name)} ${esc(actionNames[event.action]||event.action)}${event.detail?`<br>${esc(event.detail)}`:''}<small>${esc(event.created_at.replace('T',' ').slice(0,19))}</small></div>`).join('')}</div><div class="detail-actions">${actions.join('')}</div>`;
+    $('#detail-content').innerHTML=`<div class="modal-heading"><div><span class="eyebrow">ENTRY #${e.id}</span><h2>账目详情</h2></div><button class="icon-button" data-close aria-label="关闭">✕</button></div><div class="detail-hero">${entryIcon(e)}<div><h2>${e.kind==='income'?'+':'−'} ${money(e.amount,e.currency)}</h2>${settlementDisplay(e)}<p>${esc(e.description)}</p></div></div>${badge(entryStatus(e))}${paymentSummary(e)}<dl class="detail-list"><div><dt>${e.kind==='income'?'经手成员':'垫付成员'}</dt><dd>${esc(e.payer_name)}</dd></div><div><dt>发生日期</dt><dd>${esc(e.date)}</dd></div><div><dt>记录来源</dt><dd>${esc(e.source)} · ${esc(e.creator_name)}</dd></div><div class="full-span"><dt>备注</dt><dd>${esc(e.note||'—')}</dd></div>${e.review_note?`<div class="full-span"><dt>处理 / 付款备注</dt><dd>${esc(e.review_note)}</dd></div>`:''}<div class="full-span"><dt>凭证</dt><dd>${e.receipt?`<a class="tiny-link" href="/api/entries/${id}/receipt" target="_blank" rel="noreferrer">下载 ${esc(e.receipt_name)} ↗</a>`:'未附凭证'}</dd></div></dl>${mine&&['draft','pending','posted'].includes(e.status)?`<label class="upload-zone"><input type="file" id="detail-receipt" data-id="${id}" accept="image/png,image/jpeg,application/pdf"><span>＋ ${e.receipt?'替换':'补充'}凭证 <small>PNG / JPG / PDF，最多 6 MB</small></span></label>`:''}${paymentHistory(e)}<h3>操作记录</h3><div class="timeline">${events.map(event=>`<div class="timeline-item">${esc(event.name)} ${esc(actionNames[event.action]||event.action)}${event.detail?`<br>${esc(event.detail)}`:''}<small>${esc(event.created_at.replace('T',' ').slice(0,19))}</small></div>`).join('')}</div><div class="detail-actions">${actions.join('')}</div>`;
   }catch(e){$('#detail-content').innerHTML=empty('加载失败',e.message);}
 }
-function openAction(action,ids) {
+async function openAction(action,ids) {
   if(!ids.length){toast('请先选择要处理的账目',true);return;}
   const rows=state.entries.filter(e=>ids.includes(e.id));
   const labels={submit:'记入账本',pay:'登记已付款',void:'作废账目'};
-  state.action={action,ids};$('#action-form').reset();$('#action-title').textContent=labels[action];$('#action-confirm').textContent=`确认${labels[action]}`;
-  $('#action-description').textContent=action==='pay'?`请确认这 ${ids.length} 笔报销已经实际转账完成。此操作会更新账本余额，不会发起转账。`:`即将对 ${ids.length} 笔账目执行${labels[action]}。`;
-  $('#action-totals').innerHTML=groupedTotals(rows);$('#action-note-label').hidden=action==='submit';
+  state.action={action,ids,key:crypto.randomUUID(),quotes:{},loading:0};$('#action-form').reset();$('#action-title').textContent=labels[action];$('#action-confirm').textContent=`确认${labels[action]}`;
+  $('#action-description').textContent=action==='pay'?`逐笔填写本次实际已转账的金额，可部分报销。可选择记账货币或团队结算货币，不会发起转账。`:`即将对 ${ids.length} 笔账目执行${labels[action]}。`;
+  $('#action-totals').innerHTML=action==='pay'?`剩余待报销：${groupedTotals(rows,'remaining_amount')}`:groupedTotals(rows);$('#action-note-label').hidden=action==='submit';
+  const base=state.conf.reference_currency;
+  $('#action-payment-amounts').innerHTML=action==='pay'?rows.map(e=>`<div class="payment-item"><strong>#${e.id} ${esc(e.description)}</strong><small>${esc(e.payer_name)} · 原金额 ${money(e.amount,e.currency)}<br>累计已报 ${money(e.reimbursed_amount,e.currency)} · 剩余 ${money(e.remaining_amount,e.currency)}</small><label>本次付款币种<select data-payment-currency="${e.id}"><option value="${esc(e.currency)}">按记账货币 · ${esc(e.currency)}</option>${base!==e.currency?`<option value="${esc(base)}">按结算货币 · ${esc(base)}</option>`:''}</select></label><label>本次实际已报销金额<input name="payment-${e.id}" data-payment="${e.id}" type="number" inputmode="decimal" required disabled></label><small data-payment-rate="${e.id}"></small><div class="payment-after" data-payment-after="${e.id}"></div></div>`).join(''):'';
   $('#action-note-label').firstChild.textContent=action==='pay'?'付款方式 / 付款参考号':action==='void'?'作废原因':'备注';
-  $('#action-form [name=note]').required=['pay','void'].includes(action);$('#action-error').textContent='';$('#action-dialog').showModal();
+  $('#action-form [name=note]').required=['pay','void'].includes(action);$('#action-error').textContent='';$('#action-confirm').disabled=action==='pay';$('#action-dialog').showModal();
+  if(action==='pay')await Promise.all(rows.map(e=>loadPaymentQuote(e.id,e.currency)));
 }
+async function loadPaymentQuote(id,code) {
+  const action=state.action;
+  action.loading++;delete action.quotes[id];$('#action-confirm').disabled=true;
+  const input=$(`[data-payment="${id}"]`),rateLabel=$(`[data-payment-rate="${id}"]`);
+  input.disabled=true;rateLabel.textContent='正在取得付款换算…';$('#action-error').textContent='';
+  try{
+    const [quote]=await api('/entries/payment-quotes','POST',{ids:[id],currency:code});
+    if(state.action!==action||$(`[data-payment-currency="${id}"]`).value!==code)return;
+    action.quotes[id]=quote;input.step=10**-quote.decimals;input.min=input.step;input.max=quote.maximum_amount;input.value=quote.maximum_amount;input.disabled=false;
+    input.setAttribute('aria-label',`本次已报销金额 ${quote.currency}`);
+    rateLabel.textContent=`付款币种 ${quote.currency} · 剩余全额 ${quote.maximum_amount} ${quote.currency}`+(quote.currency!==quote.entry_currency?` · 1 ${quote.entry_currency} = ${quote.rate} ${quote.currency} · ${quote.rate_date} · 换算确认有效 30 分钟`:'');
+  }catch(e){if(state.action===action)rateLabel.textContent=e.message;}
+  finally{action.loading--;if(state.action===action){$('#action-confirm').disabled=action.loading>0||Object.keys(action.quotes).length!==action.ids.length;updatePaymentPreview();}}
+}
+function updatePaymentPreview() {
+  $$('[data-payment]').forEach(input=>{
+    const e=state.entries.find(e=>e.id===Number(input.dataset.payment)),value=Number(input.value),quote=state.action?.quotes[e.id];
+    const valid=quote&&input.value!==''&&Number.isFinite(value)&&value>0&&value<=Number(quote.maximum_amount);
+    const allocation=quote?(value===Number(quote.maximum_amount)?e.remaining_minor:Math.round(value/Number(quote.rate)*10**e.decimals))/10**e.decimals:0;
+    $(`[data-payment-after="${e.id}"]`).innerHTML=valid?`本次抵扣 ${money(allocation,e.currency)}<br>登记后累计已报 ${money(Number(e.reimbursed_amount)+allocation,e.currency)} · 剩余 ${money(Math.max(0,Number(e.remaining_amount)-allocation),e.currency)}`:'请输入大于 0 且不超过剩余待报销的金额';
+  });
+}
+$('#action-payment-amounts').addEventListener('input',updatePaymentPreview);
+$('#action-payment-amounts').addEventListener('change',event=>{if(event.target.matches('[data-payment-currency]'))loadPaymentQuote(Number(event.target.dataset.paymentCurrency),event.target.value);});
 
 document.addEventListener('click',async event=>{
   const b=event.target.closest('button,a,tr');if(!b)return;
@@ -387,7 +423,12 @@ $('#auth-form').addEventListener('submit',async event=>{
 $('#entry-form').addEventListener('submit',async event=>{event.preventDefault();await saveEntry('pending',$('#save-entry'));});
 $('#member-form').addEventListener('submit',async event=>{event.preventDefault();await busy($('button[type=submit]',event.target),async()=>{try{await api('/members','POST',Object.fromEntries(new FormData(event.target)));$('#member-dialog').close();await refresh();toast('成员账号已创建');}catch(e){$('#member-error').textContent=e.message;}});});
 $('#password-form').addEventListener('submit',async event=>{event.preventDefault();await busy($('button[type=submit]',event.target),async()=>{try{const data=await api('/password','POST',Object.fromEntries(new FormData(event.target)));state.csrf=data.csrf;$('#profile-dialog').close();toast('密码已更新，其他登录会话已失效');}catch(e){$('#password-error').textContent=e.message;}});});
-$('#action-form').addEventListener('submit',async event=>{event.preventDefault();await busy($('#action-confirm'),async()=>{try{await api('/entries/action','POST',{...state.action,note:event.target.elements.note.value});$('#action-dialog').close();$('#detail-dialog').close();state.selected.clear();await refresh();toast('账目状态已更新');}catch(e){$('#action-error').textContent=e.message;}});});
+$('#action-form').addEventListener('submit',async event=>{event.preventDefault();await busy($('#action-confirm'),async()=>{try{
+  const {action,ids,key,quotes}=state.action;
+  const body={action,ids,note:event.target.elements.note.value};
+  if(action==='pay')body.payments=$$('[data-payment]').map(input=>({id:Number(input.dataset.payment),amount:input.value,quote_id:quotes[input.dataset.payment].id}));
+  await api('/entries/action','POST',body,{'Idempotency-Key':key});$('#action-dialog').close();$('#detail-dialog').close();state.selected.clear();await refresh();toast(action==='pay'?'已登记本次报销，余额和剩余待报销已更新':'账目状态已更新');
+}catch(e){$('#action-error').textContent=e.message;}});});
 document.addEventListener('submit',async event=>{
   const form=event.target;
   if(form.id==='ai-form'){
