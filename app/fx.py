@@ -102,12 +102,23 @@ def calculate(entries, conf, fx, scenario=None):
     for entry in due_entries:
         key = entry['payer_id']
         if key not in groups:
-            groups[key] = {'id': key, 'name': entry['payer_name'], 'due': Decimal(0), 'suggested': Decimal(0)}
+            groups[key] = {'id': key, 'name': entry['payer_name'], 'due': Decimal(0), 'suggested': Decimal(0), 'entries': []}
         amount = convert(entry)
         groups[key]['due'] += amount
         portion = min(left, amount)
         groups[key]['suggested'] += portion
         left -= portion
+        original = Decimal(entry['amount_minor']) / (10 ** entry['decimals'])
+        groups[key]['entries'].append({
+            'id': entry['id'],
+            'description': entry['description'],
+            'date': entry['date'],
+            'currency': entry['currency'],
+            'amount': format(original, f'.{entry["decimals"]}f'),
+            'settlement': formatted(amount),
+            'suggested': formatted(portion),
+            'fully_covered': portion >= amount,
+        })
     common.update({k: formatted(v) for k, v in dict(income=income, today_income=today_income, paid=paid, cash=cash, due=due,
                    reserve=reserve, payable=payable, remaining=cash-reserve, shortage=max(due-available, Decimal(0)), extra=extra).items()})
     common['members'] = [{**g, **{k: formatted(g[k]) for k in ('due', 'suggested')}} for g in groups.values()]

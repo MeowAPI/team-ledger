@@ -210,6 +210,28 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(groups[self.user['id']]['suggested'],'20.00')
         self.assertNotIn('approved',report)
 
+    def test_report_exposes_reference_rate_for_each_original_currency(self):
+        self.entry(amount='5.98', currency='USD', description='美元垫付')
+        report=self.client.get('/api/report?base=HKD').json()
+        self.assertEqual(report['base'],'HKD')
+        self.assertIn('USD',report['fx']['rates'])
+        self.assertEqual(report['fx']['rates']['USD']['date'],'2026-10-16')
+        self.assertGreater(float(report['fx']['rates']['USD']['rate']),0)
+
+    def test_payment_plan_lists_each_project_and_suggested_amount(self):
+        self.entry(kind='income',amount='100')
+        old=(date.fromisoformat(config.today())-timedelta(days=1)).isoformat()
+        self.entry(amount='60',date=old,description='旧项目')
+        self.entry(amount='60',description='新项目')
+        report=self.client.get('/api/report').json()
+        self.assertEqual(len(report['members']),1)
+        entries=report['members'][0]['entries']
+        self.assertEqual([entry['description'] for entry in entries],['旧项目','新项目'])
+        self.assertEqual(entries[0]['suggested'],'60.00')
+        self.assertEqual(entries[1]['suggested'],'40.00')
+        self.assertTrue(entries[0]['fully_covered'])
+        self.assertFalse(entries[1]['fully_covered'])
+
     def test_approval_actions_are_removed(self):
         expense=self.entry()
         for action in ('approve','reject'):
