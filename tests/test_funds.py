@@ -203,61 +203,6 @@ class FundsTest(unittest.TestCase):
                     for buttons in value.get('reply_markup',{}).get('inline_keyboard',[]):
                         for b in buttons:self.assertLessEqual(len(b.get('callback_data','').encode()),64)
 
-    def test_dividend_income_is_excluded_from_funds_and_plans(self):
-        self.entry(kind='income',amount='5')
-        distributed=self.entry(kind='income',amount='1000',currency='EUR',status='distributed')
-        self.entry(amount='20')
-        with patch('app.fx.fetch_rates',side_effect=AssertionError('EUR dividend must not need FX')):
-            token=self.open_funds();plan=self.prepare(token)
-        self.assertEqual(plan['totals'],{'CNY':'5.00'})
-        self.assertEqual(distributed['status'],'distributed')
-        r=self.client.get('/api/report').json()
-        self.assertEqual((r['income'],r['cash'],r['shortage']),('5.00','5.00','15.00'))
-        self.assertEqual(r['distributed_balances'],{'EUR':'1000'})
-
-    def test_marking_distributed_retains_history_and_invalidates_batch(self):
-        income=self.entry(kind='income',amount='100');self.entry(amount='20')
-        token=self.open_funds();self.prepare(token)
-        resp=self.action(income,'distribute','已转入个人账户')
-        self.assertEqual(resp.status_code,200)
-        self.assertEqual(self.action(income,'distribute','重复').status_code,409)
-        self.click(12,f'f:{token}:commit');self.assertEqual(self.payment_count(),0)
-        events=self.client.get(f'/api/entries/{income["id"]}/events').json()
-        self.assertTrue(any(e['action']=='distribute' for e in events))
-        report=self.client.get('/api/report').json()
-        self.assertEqual(report['cash'],'0.00')
-        self.assertEqual(len(self.client.get('/api/entries').json()),2)
-
-    def test_telegram_income_toggle_and_existing_income_dividend_confirmation(self):
-        self.link_bot();self.click(2,'newincome');token=self.draft()['token']
-        self.click(3,f'd:{token}:cur:CNY');bot.process_update(self.message(4,'100'))
-        bot.process_update(self.message(5,'已分红收入'))
-        self.click(6,f'd:{token}:incomestate')
-        self.assertIn('不计团队余额',self.last_message()['text'])
-        self.click(7,f'd:{token}:save')
-        self.assertEqual(self.client.get('/api/entries').json()[0]['status'],'distributed')
-        existing=self.entry(kind='income',amount='50')
-        self.click(8,f'distribute:{existing["id"]}');token=self.draft()['token']
-        bot.process_update(self.message(9,'已分红到个人账户'))
-        self.assertIn('标记已分红',self.last_message()['text'])
-        self.assertEqual(self.client.get('/api/report').json()['cash'],'50.00')
-        self.click(10,f'd:{token}:commit')
-        self.assertEqual(self.client.get('/api/report').json()['cash'],'0.00')
-        bot.process_update(self.message(11,'/today'))
-        self.assertNotIn('¥150.00',self.last_message()['text'])
-
-    def test_expense_cannot_use_distributed_status_or_transition(self):
-        e=self.entry(amount='10')
-        self.assertEqual(self.action(e,'distribute','测试').status_code,409)
-        self.assertEqual(self.post('/entries',{'kind':'expense','amount':'10','currency':'CNY','description':'不应入账','date':config.today(),'status':'distributed'}).status_code,400)
-
-    def test_ai_dividend_extraction_remains_preview_only(self):
-        self.link_bot()
-        with patch('app.ai.parse',return_value={'kind':'income','amount':'100','currency':'CNY','description':'已分红收入','date':config.today(),'note':'','status':'distributed'}):
-            bot.process_update(self.message(2,'收入100元已经分红到个人账户'))
-        self.assertIn('不计团队余额',self.last_message()['text'])
-        self.assertEqual(self.client.get('/api/entries').json(),[])
-
     def test_reopening_funds_after_confirmation_or_receipt_fetches_current_report(self):
         self.entry(kind='income',amount='50');self.entry(amount='10')
         token=self.open_funds();self.prepare(token)
@@ -277,16 +222,3 @@ class FundsTest(unittest.TestCase):
         self.assertIn('不是你的当前计算',self.error())
         self.assertEqual(self.payment_count(),0)
         self.click(13,f'f:{token}:commit');self.assertEqual(self.payment_count(),1)
-
-    def test_ai_parser_maps_explicit_completed_dividends_to_distributed_status(self):
-        from app import ai
-        from app.db import settings
-        from unittest.mock import MagicMock
-        result={'kind':'income','amount':'10','currency':'CNY','description':'分红收入','date':config.today(),'note':'','income_distributed':True}
-        response=MagicMock();response.__enter__.return_value.read.return_value=json.dumps({'choices':[{'message':{'content':json.dumps(result)}}]}).encode()
-        with db() as conn:conf=settings(conn)
-        with patch.dict('os.environ',{'AI_API_KEY':'synthetic-not-real','AI_MODEL':'test'}),patch('urllib.request.urlopen',return_value=response):
-            self.assertEqual(ai.parse('收入10元已分红到个人账户',conf)['status'],'distributed')
-            result['income_distributed']=False
-            response.__enter__.return_value.read.return_value=json.dumps({'choices':[{'message':{'content':json.dumps(result)}}]}).encode()
-            self.assertEqual(ai.parse('收入10元，计划以后分红',conf)['status'],'posted')

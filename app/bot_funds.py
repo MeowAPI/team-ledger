@@ -15,27 +15,29 @@ DEFAULT_NOTE = 'Telegram 按资金建议批量登记报销'
 def ledger_rows(conn):
     entries = [dict(e) for e in conn.execute('SELECT e.*,u.name payer_name FROM entries e JOIN users u ON u.id=e.payer_id ORDER BY e.id')]
     payments = [dict(p) for p in conn.execute('SELECT * FROM payments ORDER BY id')]
-    return entries, payments
+    dividends = [dict(d) for d in conn.execute('SELECT * FROM dividends ORDER BY id')]
+    return entries, payments, dividends
 
 
 def snapshot(conn):
     conf = settings(conn)
-    entries, payments = ledger_rows(conn)
-    return hashlib.sha256(json.dumps([entries, payments, conf['reference_currency'], conf['currencies']], sort_keys=True).encode()).hexdigest()
+    entries, payments, dividends = ledger_rows(conn)
+    return hashlib.sha256(json.dumps([entries, payments, dividends, conf['reference_currency'], conf['currencies']], sort_keys=True).encode()).hexdigest()
 
 
 def report(conn, rates, scenario=None):
     conf = settings(conn)
     if not rates or rates['base'] != conf['reference_currency']:
         return None
-    entries, payments = ledger_rows(conn)
+    entries, payments, dividends = ledger_rows(conn)
     needed = {e['currency'] for e in entries if e['status'] in ('pending', 'reimbursed', 'posted')}
     needed.update(p['currency'] for p in payments)
+    needed.update(d['currency'] for d in dividends)
     if scenario:
         needed.add(scenario['currency'])
     if needed - rates['rates'].keys():
         return None
-    return fx.calculate(entries, conf, rates, scenario, payments)
+    return fx.calculate(entries, conf, rates, scenario, payments, dividends)
 
 
 def pages(items, page):
@@ -68,11 +70,9 @@ def show(conn, chat_id, token, payload, rates, page=0):
         scenario = payload['scenario']
         lines += ['⚗️ 模拟进账：' + amount_text(scenario['amount'], scenario['currency'], conf) + ' ≈ ' + fmt(result['extra']),
                   '以下含模拟收入，仅作试算；尚未入账。', '原账本可用资金：' + fmt(Decimal(result['cash']) - Decimal(result['extra']))]
-    if result.get('distributed_balances'):
-        lines.append('已分红收入（不计团队资金）：' + ' / '.join(amount_text(v, c, conf) for c, v in list(result['distributed_balances'].items())[:6]))
     for key, label in [('cash', '当前可用资金' if not payload.get('scenario') else '模拟后可用资金'),
                        ('due', '全部待报销'), ('reserve', '建议预留报销'), ('payable', '当前可安排付款'),
-                       ('remaining', '预留报销后结余'), ('shortage', '还需补充的资金')]:
+                       ('remaining', '预留报销后结余'), ('dividend_paid', '累计盈余分红'), ('dividend_available', '可分红盈余'), ('shortage', '还需补充的资金')]:
         lines.append(label + '：' + fmt(result[key]))
     projects = sorted([(m, e) for m in result['members'] for e in m['entries'] if Decimal(e['suggested']) > 0], key=lambda pair: (pair[1]['date'], pair[1]['id']))
     page, total, selected = pages(projects, page)
@@ -86,7 +86,7 @@ def show(conn, chat_id, token, payload, rates, page=0):
     if not projects:
         lines.append('暂无可安排的付款项目。')
     dates = sorted({r['date'] for r in result['fx']['rates'].values() if r.get('date')})
-    lines.append('\n可用资金 = 团队在账收入 − 实际已报销付款；优先覆盖待报销。\n每日参考汇率' + (' · ' + ' / '.join(dates) if dates else '') + '，仅供规划。')
+    lines.append('\n可用资金 = 团队收入 − 已报销 − 已分红；先预留待报销，剩余才可分红。\n每日参考汇率' + (' · ' + ' / '.join(dates) if dates else '') + '，仅供规划。')
     if result['fx'].get('warning'):
         lines.append(result['fx']['warning'])
     rows += paging(token, 'view', page, total)
@@ -95,7 +95,7 @@ def show(conn, chat_id, token, payload, rates, page=0):
         rows += [[button('＋ 将这笔真实进账记入账本', f'f:{token}:income')]]
     if Decimal(result['due']) > 0:
         rows += [[button('💳 按实际余额一键报销', f'f:{token}:batch')]]
-    rows += [[button('全部待报销项目', 'list:plan:0')], nav()]
+    rows += [[button('盈余分红 / 分红记录', 'dividends'), button('全部待报销项目', 'list:plan:0')], nav()]
     say(conn, chat_id, '\n'.join(lines), rows, edit=True)
 
 
@@ -132,10 +132,10 @@ def build_plan(conn, user, rates, mode):
         fail('暂无完整有效汇率，请刷新资金计算后重试。')
     base = conf['reference_currency']
     scale = 10 ** currency(conf, base)['decimals']
-    entries, payments = ledger_rows(conn)
+    entries, payments, dividends = ledger_rows(conn)
     def converted(e):
         return Decimal(e['amount_minor']) / (10 ** e['decimals']) * Decimal(rates['rates'][e['currency']]['rate'])
-    cash = sum((converted(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'), Decimal(0)) - sum((converted(p) for p in payments), Decimal(0))
+    cash = sum((converted(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'), Decimal(0)) - sum((converted(p) for p in payments + dividends), Decimal(0))
     left = max(cash, Decimal(0)).quantize(Decimal(1) / scale, rounding=ROUND_DOWN)
     items, totals, cost = [], {}, Decimal(0)
     pending = sorted((e for e in entries if e['status'] == 'pending'), key=lambda e: (e['date'], e['id']))

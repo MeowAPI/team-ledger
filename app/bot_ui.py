@@ -14,11 +14,11 @@ from .domain import (add_entry, currency, edit_entry, entry_view, fail, minor_am
 
 DELIVERY = ContextVar('telegram_delivery', default={})
 PAGE_SIZE = 5
-STATUS = {'pending': '待报销', 'reimbursed': '已报销', 'draft': '草稿', 'posted': '团队在账', 'distributed': '已分红', 'voided': '已作废'}
+STATUS = {'pending': '待报销', 'reimbursed': '已报销', 'draft': '草稿', 'posted': '已入账', 'voided': '已作废'}
 COMMANDS = [('start', '打开团队账本菜单'), ('book', '记录成员垫付'), ('income', '记录团队收入'),
             ('ai', '自然语言记账'), ('recent', '最近账目与详情'), ('summary', '我的待报销明细'),
             ('team', '团队待报销明细'), ('funds', '资金计算、模拟进账与一键报销'), ('today', '今日收支'),
-            ('month', '本月收支'), ('cancel', '取消当前填写'), ('help', '使用帮助')]
+            ('dividends', '报销后盈余分红与分红记录'), ('month', '本月收支'), ('cancel', '取消当前填写'), ('help', '使用帮助')]
 
 
 def queue(conn, method, payload):
@@ -94,8 +94,9 @@ def menu(conn, user, chat_id):
             [button('✨ AI 记账', 'ai'), button('📋 最近账目', 'list:recent:0')],
             [button(f'🙋 我的待报销 · {count}', 'list:mine:0'), button('👥 团队待报销', 'list:team:0')],
             [button('📊 资金与付款项目', 'funds'), button('📅 今日收支', 'period:today')],
-            [button('本月收支', 'period:month'), button('使用帮助', 'help')]]
-    draft = conn.execute("SELECT token FROM tg_drafts WHERE user_id=? AND chat_id=? AND expires>? AND step!='funds_receipt'",
+            [button('💰 盈余分红', 'dividends'), button('本月收支', 'period:month')],
+            [button('使用帮助', 'help')]]
+    draft = conn.execute("SELECT token FROM tg_drafts WHERE user_id=? AND chat_id=? AND expires>? AND step NOT IN ('funds_receipt','dividend_receipt')",
                          (user['id'], chat_id, int(time.time()))).fetchone()
     if draft:
         rows.insert(1, [button('继续当前填写', f'd:{draft["token"]}:resume'), button('取消当前填写', f'd:{draft["token"]}:cancel')])
@@ -113,6 +114,7 @@ def help_menu(conn, chat_id):
         '查账：最近账目、个人与团队待报销均可翻页，点项目查看详情。\n'
         '报销：待报销详情可分次登记；/funds 可模拟进账、查看具体项目，按实际余额一键登记多笔报销。\n'
         '一键报销：选择记账 / 结算货币，核对全部项目后确认已转账。模拟收入不会自动入账，也不会用于实际付款。\n'
+        '分红：/dividends 在扣除已报销并预留待报销后的盈余内，填写本次金额或全部盈余，确认已转账后登记。\n'
         '群聊：请回复机器人弹出的输入提示，普通聊天不会触发记账。成员草稿互相独立。\n'
         '取消：/cancel；返回菜单：/start。凭证文件请到 Web 上传。', [nav()], edit=True)
 
@@ -163,14 +165,11 @@ def preview(conn, chat_id, token, data, rates=None):
     converted = reference(data['amount'], data['currency'], conf, rates)
     if converted:
         lines.append(converted)
-    if data['kind'] == 'income':
-        lines.append('收入归属：已分红到个人账户，不计团队余额。' if data.get('status') == 'distributed' else '收入归属：团队在账，可用于报销。')
     lines += [f'日期：{data["date"]}', f'成员：{payer["name"] if payer else "当前成员"}', f'备注：{data.get("note") or "未填写"}', '\n核对后确认才入账。']
     say(conn, chat_id, '\n'.join(lines),
         [[button('✅ 保存修改' if data.get('_edit_id') else '✅ 确认入账', f'd:{token}:save')],
          [button('金额', f'd:{token}:edit:amount'), button('币种', f'd:{token}:edit:currency'), button('用途', f'd:{token}:edit:description')],
          [button('日期', f'd:{token}:edit:date'), button('备注', f'd:{token}:edit:note'), button('成员', f'd:{token}:edit:payer')],
-         *([[button('切换为团队在账' if data.get('status') == 'distributed' else '切换为已分红收入', f'd:{token}:incomestate')]] if data['kind'] == 'income' else []),
          [button('取消', f'd:{token}:cancel'), button('主菜单', 'home')]], edit=True)
 
 
@@ -238,10 +237,6 @@ def detail(conn, chat_id, entry_id, rates=None):
     rows = []
     if entry['kind'] == 'expense' and entry['status'] in ('pending', 'draft') and not entry['reimbursed_minor']:
         rows.append([button('✏️ 修改账目', f'edit:{entry_id}')])
-    if entry['kind'] == 'income' and entry['status'] == 'posted':
-        rows.append([button('标记已分红到个人账户', f'distribute:{entry_id}')])
-    if entry['status'] == 'distributed':
-        lines.append('已分红到个人账户，不计团队可用资金、报销预算或结余。')
     if entry['status'] == 'pending':
         rows.append([button('💳 继续报销' if entry['reimbursed_minor'] else '💳 登记已付款', f'pay:{entry_id}')])
     if entry['status'] == 'draft':
@@ -257,8 +252,8 @@ def period_summary(conn, chat_id, period):
         fail('时间范围无效')
     conf, today = settings(conn), config.today()
     start = today if period == 'today' else today[:7] + '-01'
-    rows = conn.execute("SELECT kind,currency,decimals,SUM(amount_minor) amount,COUNT(*) count FROM entries WHERE date>=? AND date<=? AND status NOT IN ('draft','voided','distributed') GROUP BY kind,currency,decimals", (start, today)).fetchall()
-    lines = [f'📅 {"今日" if period == "today" else "本月"}收支 · {start} 至 {today}', '按发生日期统计，原币种分别列示；收入仅计团队在账，已分红收入不计。']
+    rows = conn.execute("SELECT kind,currency,decimals,SUM(amount_minor) amount,COUNT(*) count FROM entries WHERE date>=? AND date<=? AND status NOT IN ('draft','voided') GROUP BY kind,currency,decimals", (start, today)).fetchall()
+    lines = [f'📅 {"今日" if period == "today" else "本月"}收支 · {start} 至 {today}', '按发生日期统计，原币种分别列示；收入与盈余分红分开记录。']
     for kind, label in [('income', '收入'), ('expense', '成员垫付')]:
         selected = [r for r in rows if r['kind'] == kind]
         lines.append(f'\n{label} · {sum(r["count"] for r in selected)} 笔\n' +
@@ -325,14 +320,13 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
     if action == 'cancel':
         conn.execute('DELETE FROM tg_drafts WHERE token=?', (token,))
         say(conn, chat_id, '已关闭报销结果。' if payload.get('_receipt') else '已取消，此次填写没有入账。', [nav()], edit=True)
-    elif action == 'incomestate' and step == 'confirm' and payload.get('kind') == 'income':
-        payload['status'] = 'posted' if payload.get('status') == 'distributed' else 'distributed'
-        persist(conn, token, payload, 'confirm')
-        preview(conn, chat_id, token, payload, rates)
     elif action == 'edit' and len(parts) == 4 and step == 'confirm':
         show_field(conn, chat_id, draft, parts[3])
     elif action == 'resume':
-        if payload.get('_flow') == 'funds':
+        if payload.get('_flow') == 'dividends':
+            from . import bot_dividends
+            bot_dividends.resume(conn, user, chat_id, draft, rates)
+        elif payload.get('_flow') == 'funds':
             from . import bot_funds
             bot_funds.resume(conn, chat_id, draft, rates)
         elif step == 'confirm':
@@ -353,7 +347,7 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
                      'description': '请输入用途 / 收入说明。', 'edit_description': '请输入用途 / 收入说明。',
                      'edit_note': '请输入备注，发送 - 清空。', 'pay_note': '请输入付款方式 / 付款参考号。',
                      'pay_amount': f'请输入本次实际已报销金额（{payload.get("_quote",{}).get("currency","")}），发送 全额 报销剩余全部。',
-                     'void_note': '请输入作废原因。', 'distribute_note': '请输入分红说明。', 'ai_text': '请描述一笔收支。'}
+                     'void_note': '请输入作废原因。', 'ai_text': '请描述一笔收支。'}
             ask(conn, chat_id, draft, step, hints.get(step, '请继续填写。'))
     elif action == 'paycur' and len(parts) == 4 and step == 'pay_currency':
         payload['_quote'] = make_payment_quote(conn, user, payload['_entry_id'], parts[3], rates)
@@ -425,11 +419,12 @@ def show_payment_currencies(conn, chat_id, token, payload):
 
 
 def action_preview(conn, chat_id, token, payload):
+    if payload.get('_action') == 'distribute':
+        fail('按收入标记分红的规则已移除，请使用 /dividends 登记盈余分红。')
     entry, conf = entry_view(conn, payload['_entry_id']), settings(conn)
     action = payload['_action']
-    label = {'pay': '登记已付款', 'void': '作废账目', 'submit': '记入账本', 'distribute': '标记已分红'}[action]
+    label = {'pay': '登记已付款', 'void': '作废账目', 'submit': '记入账本'}[action]
     description = {'pay': '请确认上述本次金额已经实际转账。系统只登记本次付款，不会发起转账。',
-                   'distribute': '请确认整笔收入已分红到个人账户。确认后保留记录，并从团队资金和报销预算中排除，不会发起转账。',
                    'void': '账目保留历史，但不再计入有效收支。', 'submit': '草稿将进入待报销，金额不会从团队余额扣除。'}[action]
     payment_text = ''
     rows = [[button('确认' + label, f'd:{token}:commit')]]
@@ -504,6 +499,14 @@ def handle(conn, update, ai_result=None, ai_error=None, rates=None):
         list_entries(conn, user, chat_id, scope, page, rates)
     elif command in ('/today', '/month') or data.startswith('period:'):
         period_summary(conn, chat_id, command[1:] if command else data.split(':', 1)[1])
+    elif command == '/dividends' or data == 'dividends':
+        from . import bot_dividends
+        bot_dividends.start(conn, user, telegram_id, chat_id, rates)
+    elif data.startswith('v:'):
+        from . import bot_dividends
+        bot_dividends.callback(conn, user, telegram_id, chat_id, data, rates)
+    elif data.startswith('distribute:'):
+        fail('按收入标记分红的旧规则已移除，请使用 /dividends 登记盈余分红。')
     elif command == '/funds' or data == 'funds':
         from . import bot_funds
         bot_funds.start(conn, user, telegram_id, chat_id, rates)
@@ -516,7 +519,7 @@ def handle(conn, update, ai_result=None, ai_error=None, rates=None):
     elif data == 'ai' or command == '/ai' and not argument:
         new_draft(conn, user, telegram_id, chat_id, step='ai_text')
         ask(conn, chat_id, draft_for(conn, telegram_id, chat_id), 'ai_text', '请描述一笔收支，例如「昨天打车花了35元」。')
-    elif data.startswith(('e:', 'edit:', 'pay:', 'void:', 'post:', 'distribute:')):
+    elif data.startswith(('e:', 'edit:', 'pay:', 'void:', 'post:')):
         entry_action(conn, user, telegram_id, chat_id, data, rates)
     elif data.startswith('f:'):
         from . import bot_funds
@@ -556,8 +559,6 @@ def entry_action(conn, user, telegram_id, chat_id, data, rates):
         token, body = new_draft(conn, user, telegram_id, chat_id, body, step='action_confirm')
         action_preview(conn, chat_id, token, body)
         return
-    if action == 'distribute' and (entry['kind'] != 'income' or entry['status'] != 'posted'):
-        fail('只有团队在账收入可以标记已分红')
     body = {'_action': action, '_entry_id': entry['id'], '_snapshot': entry_snapshot(conn, entry['id'])}
     if action == 'pay':
         token, body = new_draft(conn, user, telegram_id, chat_id, body, step='pay_currency')
@@ -565,13 +566,17 @@ def entry_action(conn, user, telegram_id, chat_id, data, rates):
         return
     new_draft(conn, user, telegram_id, chat_id, body, step=action + '_note')
     ask(conn, chat_id, draft_for(conn, telegram_id, chat_id), action + '_note',
-        f'处理 #{entry["id"]}「{entry["description"]}」\n' + ('请填写付款方式 / 付款参考号，请先完成真实转账。' if action == 'pay' else '请填写分红说明，下一步确认后从团队余额排除。' if action == 'distribute' else '请填写作废原因。'))
+        f'处理 #{entry["id"]}「{entry["description"]}」\n' + ('请填写付款方式 / 付款参考号，请先完成真实转账。' if action == 'pay' else '请填写作废原因。'))
 
 
 def text_input(conn, user, msg, telegram_id, chat_id, text, command, ai_result, ai_error, rates):
     draft, conf = draft_for(conn, telegram_id, chat_id), settings(conn)
     if draft and command != '/ai' and accepts_text(conn, msg, telegram_id, chat_id, draft):
         step, payload = draft['step'], json.loads(draft['payload'])
+        if payload.get('_flow') == 'dividends':
+            from . import bot_dividends
+            bot_dividends.text_input(conn, user, chat_id, draft, text)
+            return
         if payload.get('_flow') == 'funds':
             from . import bot_funds
             bot_funds.text_input(conn, chat_id, draft, text, rates)
@@ -585,7 +590,7 @@ def text_input(conn, user, msg, telegram_id, chat_id, text, command, ai_result, 
             persist(conn, draft['token'], payload, 'pay_note')
             ask(conn, chat_id, draft_for(conn, telegram_id, chat_id), 'pay_note', '请输入付款方式 / 付款参考号。下一步会展示金额与剩余款，确认后才登记。')
             return
-        elif step in ('pay_note', 'void_note', 'distribute_note'):
+        elif step in ('pay_note', 'void_note'):
             payload['note'] = text_value(text, '付款备注 / 作废原因', 500)
             if step == 'pay_note' and not payload.get('_quote'):
                 show_payment_currencies(conn, chat_id, draft['token'], payload)
