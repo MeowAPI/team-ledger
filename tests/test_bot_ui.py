@@ -328,6 +328,28 @@ class TelegramUiTest(unittest.TestCase):
         self.assertIn('剩余全额可安排',text); self.assertIn('可部分报销',text)
         self.assertIn('建议 ¥5.00 CNY',text)
 
+    def test_recent_hides_voided_and_offers_voided_list(self):
+        self.link_bot()
+        self.entry(description='正常账目')
+        gone=self.entry(description='已作废账目'); self.action(gone,'void','重复录入')
+        self.click(2,'list:recent:0')
+        text=self.last_message()['text']
+        self.assertIn('正常账目',text); self.assertNotIn('已作废账目',text)
+        labels=[b for row in self.last_message()['reply_markup']['inline_keyboard'] for b in row]
+        self.assertTrue(any(b.get('callback_data')=='list:voided:0' for b in labels))
+        self.click(3,'list:voided:0')
+        text=self.last_message()['text']
+        self.assertIn('已作废账目',text); self.assertNotIn('正常账目',text)
+
+    def test_voided_entry_can_be_permanently_deleted_from_bot(self):
+        self.link_bot()
+        gone=self.entry(description='删除我'); self.action(gone,'void','重复录入')
+        self.click(2,f'delete:{gone["id"]}')
+        self.assertIn('永久删除',self.last_message()['text'])
+        self.click(3,f'deleteyes:{gone["id"]}')
+        self.assertIn('已永久删除',self.last_message()['text'])
+        self.assertEqual(self.client.get('/api/entries').json(),[])
+
     def test_today_excludes_voided_income_and_drafts(self):
         self.link_bot()
         self.entry(kind='income',amount='100')

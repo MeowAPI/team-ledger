@@ -31,7 +31,8 @@ const entryStatus = e => e.status==='pending'&&e.reimbursed_minor>0?'partial':e.
 const ROLES = {owner:'团队成员 · 共同管理',finance:'团队成员 · 共同管理',member:'团队成员 · 共同管理'};
 const COLORS = ['green','orange','blue','purple'];
 const state = {user:null,csrf:'',conf:null,members:[],entries:[],integrations:{},report:null,page:'overview',
-  filter:{text:'',kind:'all',currency:'all',payer:'all',status:'all',from:'',to:''},reimburseTab:'pending',selected:new Set(),entryKind:'expense',editing:null,entryKey:null,action:null,setup:false,base:null,loadId:0};
+  filter:{text:'',kind:'all',currency:'all',payer:'all',status:'all',from:'',to:''},reimburseTab:'pending',selected:new Set(),entryKind:'expense',editing:null,entryKey:null,action:null,setup:false,base:null,loadId:0,
+  ai:{busy:false,conversation:[],plan:null,selected:new Set(),error:''}};
 const canManage = () => Boolean(state.user?.active);
 const isOwner = canManage;
 const cur = code => state.conf?.currencies.find(c => c.code === code) || {code,symbol:code,decimals:2};
@@ -57,7 +58,8 @@ async function api(path, method='GET', body, extraHeaders={}) {
     if (response.status===401 && state.user) {
       state.user=null; $$('dialog[open]').forEach(d=>d.close()); await showAuth(false);
     }
-    throw new Error(typeof data.error==='string'?data.error:response.status===422?'输入格式不正确，请检查表单':'操作失败，请稍后重试');
+    const error=new Error(typeof data.error==='string'?data.error:response.status===422?'输入格式不正确，请检查表单':'操作失败，请稍后重试');
+    error.status=response.status;throw error;
   }
   return data;
 }
@@ -114,7 +116,159 @@ function reportWarning(report=state.report) {
   return '';
 }
 function aiComposer() {
-  return `<section class="ai-input-card"><div class="ai-input-header"><strong>✧ 说一句，帮你记下来</strong><span>支出或收入 · 核对后确认入账</span></div><form id="ai-form" class="ai-composer"><input name="text" placeholder="例如：今天帮团队续费设计工具，花了 49 美元" required maxlength="2000" aria-label="自然语言记账"><button class="btn primary" type="submit">${icon('spark')}AI 识别</button></form><div class="form-error" id="ai-error"></div></section>`;
+  return `<section class="ai-input-card"><div class="ai-input-header"><strong>✧ 说一段话，帮你记好整本账</strong><span>多笔 · 修改 · 作废 · 报销 · 查询</span></div><p class="ai-example">例如：昨天我垫了打车 35 元，老王垫的聚餐 240 元，收到客户尾款 2000 美元；顺便告诉我现在还能报多少。</p><button class="btn primary wide" data-ai-open>${icon('spark')}打开 AI 记账助手</button></section>`;
+}
+
+const AI_LABELS={create_entry:'新增账目',edit_entry:'修改账目',void_entry:'作废账目',submit_entry:'草稿入账',distribute_income:'收入分红',pay_entry:'登记报销',batch_pay:'批量报销',delete_entry:'永久删除'};
+const AI_ICONS={create_entry:'📝',edit_entry:'✏️',void_entry:'🗑️',submit_entry:'📥',distribute_income:'🎁',pay_entry:'💳',batch_pay:'📦',delete_entry:'🔥'};
+const aiSelected=()=>state.ai.plan?state.ai.plan.actions.filter(a=>!a.errors?.length&&state.ai.selected.has(a.index)).length:0;
+function aiMessage(role,text){state.ai.conversation.push({role,text:String(text)});if(state.ai.conversation.length>24)state.ai.conversation=state.ai.conversation.slice(-24);}
+function aiHistory(){
+  const turns=state.ai.conversation.slice(-10).map(m=>({role:m.role,text:String(m.text).slice(0,900)}));
+  if(state.ai.plan?.actions?.length){
+    const summary=state.ai.plan.actions.map((a,i)=>`${i+1}. ${a.summary}`).join('\n');
+    if(summary)turns.push({role:'assistant',text:'当前操作清单：\n'+summary.slice(0,900)});
+  }
+  return turns;
+}
+function aiFieldRows(action){
+  const r=action.resolved||{},rows=[];
+  const add=(label,value)=>{if(value!==undefined&&value!==null&&value!=='')rows.push(`<span><b>${esc(label)}</b> ${esc(value)}</span>`);};
+  if(action.type==='create_entry'){
+    add('类型',r.kind==='income'?'团队收入':'成员垫付');add('金额',`${r.amount} ${r.currency}`);add('用途',r.description);
+    add('日期',r.date);add('成员',r.payer_name||r.payer_id);add('状态',r.status);add('备注',r.note);
+  }else if(action.type==='edit_entry'){
+    add('编号',`#${r.id}`);add('金额',`${r.amount} ${r.currency}`);add('用途',r.description);add('日期',r.date);add('备注',r.note);
+  }else if(['void_entry','submit_entry','distribute_income'].includes(action.type)){
+    add('编号',`#${r.id}`);add('备注',r.note);
+  }else if(action.type==='pay_entry'){
+    add('编号',`#${r.id}`);add('本次付款',`${r.amount} ${r.currency}`);add('抵扣',`${r.entry_amount} ${r.entry_currency}`);
+    add('登记后剩余',`${r.remaining_amount} ${r.entry_currency}`);add('付款备注',r.note);
+  }else if(action.type==='batch_pay'){
+    add('付款币种',r.mode==='settlement'?'团队结算货币':'各笔记账货币');add('限定成员',r.payer_id?`#${r.payer_id}`:'');
+    add('日期范围',[r.date_from,r.date_to].filter(Boolean).join(' 至 '));add('付款备注',r.note);
+  }else if(action.type==='delete_entry'){
+    add('编号',`#${r.id}`);add('说明',r.description);
+  }
+  return rows.length?`<div class="ai-fields">${rows.join('')}</div>`:'';
+}
+function aiActionCard(action,position){
+  const errors=action.errors||[],warnings=action.warnings||[],checked=state.ai.selected.has(action.index),disabled=Boolean(errors.length);
+  const batch=action.type==='batch_pay'&&action.resolved?.items?.length?`<div class="ai-batch-items">${action.resolved.items.slice(0,12).map(item=>`<div>#${esc(item.id)} ${esc(item.description)} · 实际付款 ${esc(item.amount)} ${esc(item.currency)} · 抵扣 ${esc(item.credited)} ${esc(item.entry_currency)}</div>`).join('')}${action.resolved.items.length>12?`<div>另有 ${action.resolved.items.length-12} 笔，确认后一次登记。</div>`:''}</div>`:'';
+  return `<article class="ai-action-card ${disabled?'has-error':''}"><label class="ai-action-check"><input type="checkbox" data-ai-select="${action.index}" ${checked?'checked':''} ${disabled?'disabled':''} aria-label="选择第 ${position} 项操作"></label><div class="ai-action-body"><div class="ai-action-head"><span class="ai-action-icon">${AI_ICONS[action.type]||'•'}</span><strong>${esc(action.label||AI_LABELS[action.type]||action.type)}</strong><span class="ai-action-type">${esc(AI_LABELS[action.type]||action.type)}</span></div><p class="ai-action-summary">${esc(action.summary)}</p>${errors.length?`<div class="ai-action-error">⚠️ ${errors.map(esc).join('<br>⚠️ ')}</div>`:''}${warnings.length?`<div class="ai-action-warning">💡 ${warnings.map(esc).join('<br>💡 ')}</div>`:''}${aiFieldRows(action)}${batch}${action.type==='create_entry'&&!disabled?`<button class="btn small" data-ai-edit-form="${action.index}">在表单中修改（可传凭证）</button>`:''}</div></article>`;
+}
+function aiQueryText(card){
+  if(!card)return'';
+  if(card.kind==='entries')return `🔎 查到 ${card.total} 笔`;
+  if(card.kind==='summary')return `📊 共 ${card.count} 笔`;
+  if(card.kind==='balance'||card.kind==='due'||card.kind==='funds')return card.complete?`💰 可用 ${card.cash} ${card.base} · 待报销 ${card.due} ${card.base}`:(card.warning||'资金数据暂不可用');
+  if(card.kind==='simulation')return card.complete?`⚗️ 模拟进账后可用 ${card.cash} ${card.base}`:(card.warning||'模拟暂不可用');
+  if(card.kind==='entry')return `🧾 #${card.entry.id} ${card.entry.description}`;
+  if(card.kind==='error')return `⚠️ ${card.error}`;
+  return '';
+}
+function aiQueryCard(card){
+  if(!card)return'';
+  if(card.kind==='entries'){
+    const totals=Object.entries(card.totals||{}).map(([code,amount])=>money(amount,code)).join(' / ')||'—';
+    return `<div class="ai-query-card"><div class="ai-query-head">🔎 查询结果 <span>共 ${esc(card.total)} 笔 · ${totals}</span></div><div class="ai-query-table">${table(card.entries||[])}</div></div>`;
+  }
+  if(card.kind==='summary'){
+    const slots=[...(card.by_kind?.expense||[]).map(x=>({...x,kind:'expense'})),...(card.by_kind?.income||[]).map(x=>({...x,kind:'income'}))];
+    return `<div class="ai-query-card"><div class="ai-query-head">📊 统计 <span>${esc(card.count)} 笔${card.from?` · ${esc(card.from)}${card.to?` 至 ${esc(card.to)}`:''}`:''}</span></div><div class="ai-metrics">${slots.length?slots.map(x=>`<span>${x.kind==='income'?'收入':'支出'} ${money(x.amount,x.currency)} · ${esc(x.count)} 笔</span>`).join(''):'<span>没有符合条件的数据</span>'}</div></div>`;
+  }
+  if(['balance','due','funds'].includes(card.kind)){
+    if(!card.complete)return `<div class="ai-query-card warn">📊 ${esc(card.warning||'资金数据暂不可用')}</div>`;
+    const base=card.base;
+    return `<div class="ai-query-card"><div class="ai-query-head">💰 资金概览 <span>${esc(base)}</span></div><div class="ai-metrics"><span>可用 ${money(card.cash,base)}</span><span>在账收入 ${money(card.income,base)}</span><span>已报销 ${money(card.paid,base)}</span><span>待报销 ${money(card.due,base)}</span><span>可安排 ${money(card.payable,base)}</span><span>缺口 ${money(card.shortage,base)}</span></div>${card.members?.length?`<div class="ai-batch-items">${card.members.filter(m=>Number(m.due)>0).slice(0,8).map(m=>`<div>🙋 ${esc(m.name)} · 待报销 ${money(m.due,base)} · 建议 ${money(m.suggested,base)}</div>`).join('')}</div>`:''}</div>`;
+  }
+  if(card.kind==='simulation'){
+    if(!card.complete)return `<div class="ai-query-card warn">⚗️ ${esc(card.warning||'模拟暂不可用')}</div>`;
+    const base=card.base;
+    return `<div class="ai-query-card"><div class="ai-query-head">⚗️ 模拟进账 <span>仅试算，未入账</span></div><div class="ai-metrics"><span>模拟后可用 ${money(card.cash,base)}</span><span>待报销 ${money(card.due,base)}</span><span>可安排 ${money(card.payable,base)}</span><span>缺口 ${money(card.shortage,base)}</span></div></div>`;
+  }
+  if(card.kind==='entry'){
+    const e=card.entry;
+    return `<div class="ai-query-card"><div class="ai-query-head">🧾 账目 #${esc(e.id)} <span>${badge(entryStatus(e))}</span></div><div class="ai-metrics"><span>${esc(e.description)}</span><span>${money(e.amount,e.currency)}</span><span>${esc(e.payer_name)}</span><span>${esc(e.date)}</span>${e.kind==='expense'&&e.reimbursed_minor>0?`<span>剩余 ${money(e.remaining_amount,e.currency)}</span>`:''}</div></div>`;
+  }
+  if(card.kind==='error')return `<div class="ai-query-card error">⚠️ ${esc(card.error)}</div>`;
+  return'';
+}
+function renderAiPlan(){
+  const plan=state.ai.plan;if(!plan)return'';
+  const actions=plan.actions||[],results=plan.results||[],valid=actions.filter(a=>!a.errors?.length),count=aiSelected();
+  let html='<section class="ai-plan">';
+  if(results.length)html+=`<div class="ai-results">${results.map(r=>aiQueryCard(r.card)).join('')}</div>`;
+  if(actions.length){
+    html+=`<div class="ai-plan-head"><strong>📋 操作清单</strong><span id="ai-plan-count">${actions.length} 项 · 已选 ${count} 项</span></div>`;
+    html+=actions.map((action,position)=>aiActionCard(action,position+1)).join('');
+  }
+  if(plan.plan_id)html+=`<div class="ai-plan-footer"><span id="ai-selected-count">已选 ${count} / ${valid.length} 项</span><button class="btn primary" data-ai-confirm ${count?'':'disabled'}>✅ 确认执行 ${count} 项</button><button class="btn" data-ai-cancel-plan>取消清单</button></div>`;
+  else if(actions.length)html+=`<p class="ai-plan-note">没有可执行的操作，请根据上面的提示补充或修改描述。</p>`;
+  html+='</section>';
+  return html;
+}
+function renderAi(){
+  const transcript=$('#ai-transcript');if(!transcript)return;
+  const bubbles=state.ai.conversation.map(m=>`<div class="ai-bubble ${m.role==='user'?'user':'assistant'}">${esc(m.text).replace(/\n/g,'<br>')}</div>`).join('');
+  const typing=state.ai.busy?`<div class="ai-bubble assistant typing" aria-label="AI 正在思考"><span></span><span></span><span></span></div>`:'';
+  transcript.innerHTML=bubbles+typing+renderAiPlan();
+  transcript.scrollTop=transcript.scrollHeight;
+  const form=$('#ai-form');
+  if(form){form.elements.text.disabled=state.ai.busy;const button=$('button[type=submit]',form);if(button)button.disabled=state.ai.busy;}
+}
+function openAi(){const dialog=$('#ai-dialog');if(!dialog)return;renderAi();if(!dialog.open)dialog.showModal();setTimeout(()=>$('#ai-form')?.elements.text.focus(),60);}
+function closeAi(){const dialog=$('#ai-dialog');if(dialog?.open)dialog.close();}
+async function submitAi(form){
+  const text=form.elements.text.value.trim();if(!text||state.ai.busy)return;
+  const history=aiHistory();$('#ai-error').textContent='';aiMessage('user',text);form.elements.text.value='';
+  state.ai.busy=true;state.ai.plan=null;state.ai.selected.clear();renderAi();
+  try{
+    const data=await api('/ai/plan','POST',{text,history});
+    const summary=[data.reply||'',...(data.questions||[]).map(q=>'❓ '+q)].filter(Boolean).join('\n');
+    aiMessage('assistant',summary||'已为你整理好操作，请核对下面的清单。');
+    state.ai.plan=data;state.ai.selected=new Set((data.actions||[]).filter(a=>!a.errors?.length).map(a=>a.index));
+    renderAi();
+  }catch(e){$('#ai-error').textContent=e.message;aiMessage('assistant','⚠️ '+e.message);renderAi();}
+  finally{state.ai.busy=false;renderAi();}
+}
+async function executeAiPlan(){
+  const plan=state.ai.plan;if(!plan?.plan_id||state.ai.busy)return;
+  const actions=[...state.ai.selected].sort((a,b)=>a-b);if(!actions.length){toast('请先勾选要执行的操作',true);return;}
+  state.ai.busy=true;renderAi();
+  try{
+    const data=await api('/ai/execute','POST',{plan_id:plan.plan_id,actions},{'Idempotency-Key':crypto.randomUUID()});
+    const lines=[`✅ 已完成 ${data.results.length} 项操作`];
+    for(const r of data.results){
+      if(r.type==='create_entry'||r.type==='edit_entry')lines.push(`📝 #${r.entry_id} ${r.description} · ${r.amount} ${r.currency}`);
+      else if(r.type==='pay_entry')lines.push(`💳 #${r.entry_id} 已登记付款`);
+      else if(r.type==='batch_pay')lines.push(`📦 已登记 ${r.count} 笔报销`);
+      else if(r.type==='delete_entry')lines.push(`🔥 #${r.entry_id} 已永久删除`);
+      else lines.push(`✅ #${r.entry_id} 已更新`);
+    }
+    for(const q of data.queries||[]){const line=aiQueryText(q.card);if(line)lines.push(line);}
+    aiMessage('assistant',lines.join('\n'));
+    state.ai.plan=null;state.ai.selected.clear();
+    await refresh(false);render();renderAi();toast(`已执行 ${data.results.length} 项操作`);
+  }catch(e){
+    $('#ai-error').textContent=e.message;aiMessage('assistant','⚠️ '+e.message+(e.status===409?'\n清单已失效，请重新描述。':''));
+    if(e.status===409){state.ai.plan=null;state.ai.selected.clear();}
+    renderAi();
+  }finally{state.ai.busy=false;renderAi();}
+}
+function cancelAiPlan(){
+  if(!state.ai.plan)return;
+  aiMessage('assistant','已取消本次操作清单，没有写入任何账目。');
+  state.ai.plan=null;state.ai.selected.clear();renderAi();
+}
+function aiEditInForm(index){
+  const plan=state.ai.plan;if(!plan)return;
+  const action=plan.actions.find(a=>a.index===index);if(!action||action.type!=='create_entry')return;
+  const r=action.resolved;
+  state.ai.plan={...plan,actions:plan.actions.filter(a=>a.index!==index)};
+  state.ai.selected.delete(index);closeAi();
+  openEntry(r.kind,{kind:r.kind,amount:r.amount,currency:r.currency,description:r.description,date:r.date,payer_id:r.payer_id,note:r.note,status:r.status});
+  toast('已在表单中打开；保存后不会再执行清单中的这一项');
 }
 function rateDetails(report=state.report) {
   if (!report) return '';
@@ -145,6 +299,7 @@ function distributedNotice() {
 }
 function renderOverview() {
   const r=state.report,ok=r?.complete,base=r?.base || state.conf.reference_currency;
+  const recent=state.entries.filter(e=>e.status!=='voided');
   const pending=state.entries.filter(e=>e.status==='pending').length;
   const metric=k=>ok?money(r[k],base):'—';
   const memberRows=ok?r.members:[];
@@ -153,23 +308,24 @@ function renderOverview() {
   distributedNotice()+reportWarning()+
   (ok?`<div class="callout">${icon('spark')}<span>优先报销已开启：当前可预留 <strong>${money(r.reserve,base)}</strong> 用于报销，${Number(r.shortage)>0?`仍有 <strong>${money(r.shortage,base)}</strong> 缺口。`:`预留后结余 <strong>${money(r.remaining,base)}</strong>。`}</span><a href="#calculator">查看资金计算 →</a></div>`:'')+
   `<div class="section-grid"><section class="panel"><div class="panel-heading"><div><h3>最近 7 天，资金流向</h3><p>团队收入与实际报销付款 · ${esc(base)} 参考换算</p></div><div class="chart-key"><span><i></i>收入</span><span><i class="orange"></i>报销</span></div></div>${chart()}</section><section class="panel"><div class="panel-heading"><div><h3>谁还在等报销</h3><p>按成员汇总 · 全部待报销</p></div><a href="#reimbursements" class="tiny-link">全部 ↗</a></div>${memberRows.length?`<div class="member-list">${memberRows.slice(0,4).map(m=>`<div class="member-row">${avatar(m.name,m.id)}<div class="member-info"><strong>${esc(m.name)}${m.id===state.user.id?' · 我':''}</strong><small>${state.entries.filter(e=>e.payer_id===m.id&&e.status==='pending').length} 笔待报销</small></div><div class="member-amount">${money(m.due,base,false)} <small>${esc(base)}</small></div></div>`).join('')}</div>`:empty(ok?'暂时没有待报销':'保留原币种，等待汇率',ok?'一笔笔记清，一次次报完。':'到收支明细查看原始记录。')}</section></div>`+
-  `<section class="panel recent-panel"><div class="panel-heading"><div><h3>最近的几笔</h3><p>团队的每一份投入，都在这里。</p></div><a href="#ledger" class="tiny-link">查看全部收支 ↗</a></div>${table(state.entries.slice(0,5))}<div class="table-footer"><span>共 ${state.entries.length} 笔记录 · 原币种金额</span><span>Web 与 Telegram 共用一本账</span></div></section>`;
+  `<section class="panel recent-panel"><div class="panel-heading"><div><h3>最近的几笔</h3><p>团队的每一份投入，都在这里。</p></div><a href="#ledger" class="tiny-link">查看全部收支 ↗</a></div>${table(recent.slice(0,5))}<div class="table-footer"><span>共 ${recent.length} 笔记录 · 原币种金额</span><span>Web 与 Telegram 共用一本账</span></div></section>`;
 }
 function filteredEntries() {
   const f=state.filter;
   return state.entries.filter(e=>(!f.text||[e.description,e.note,e.payer_name].join(' ').toLowerCase().includes(f.text.toLowerCase())) &&
     (f.kind==='all'||e.kind===f.kind)&&(f.currency==='all'||e.currency===f.currency)&&(f.payer==='all'||e.payer_id===Number(f.payer))&&
-    (f.status==='all'||(f.status==='partial'?entryStatus(e)==='partial':e.status===f.status))&&(!f.from||e.date>=f.from)&&(!f.to||e.date<=f.to));
+    (f.status==='all'?e.status!=='voided':f.status==='partial'?entryStatus(e)==='partial':e.status===f.status)&&(!f.from||e.date>=f.from)&&(!f.to||e.date<=f.to));
 }
 function ledgerResults() {
   const rows=filteredEntries();
-  return table(rows)+`<div class="table-footer"><span>已显示 ${rows.length} / ${state.entries.length} 笔 · 原始金额，未合并不同币种</span><span>点击账目查看详情</span></div>`;
+  const total=state.filter.status==='all'?state.entries.filter(e=>e.status!=='voided').length:state.entries.length;
+  return table(rows)+`<div class="table-footer"><span>已显示 ${rows.length} / ${total} 笔 · 原始金额，未合并不同币种</span><span>点击账目查看详情</span></div>`;
 }
 function renderLedger() {
   const f=state.filter;
   return heading('收支明细','成员垫付、团队进账，一本账就能看清。','EVERY ENTRY COUNTS',`<button class="btn" data-export>${icon('download')}导出</button>${canManage()?'<button class="btn" data-new="income">＋ 登记收入</button>':''}${newButton()}`)+
     aiComposer()+
-    `<section class="panel"><div class="filter-tabs">${[['all','全部记录'],['expense','成员垫付'],['income','团队收入']].map(([value,label])=>`<button data-filter-kind="${value}" class="${f.kind===value?'active':''}">${label}</button>`).join('')}</div><div class="filters"><input id="search-entries" placeholder="搜索用途、成员、备注…" value="${esc(f.text)}" aria-label="搜索账目"><select data-filter="currency" aria-label="筛选币种"><option value="all">全部币种</option>${options(state.conf.currencies,c=>c.code,c=>c.code,f.currency)}</select><select data-filter="payer" aria-label="筛选成员"><option value="all">全部成员</option>${options(state.members,m=>m.id,m=>m.name,f.payer)}</select><select data-filter="status" aria-label="筛选状态"><option value="all">全部状态</option>${options(Object.entries(STATUS),x=>x[0],x=>x[1],f.status)}</select><input type="date" data-filter="from" value="${esc(f.from)}" aria-label="开始日期"><input type="date" data-filter="to" value="${esc(f.to)}" aria-label="结束日期"></div><div id="ledger-results">${ledgerResults()}</div></section>`;
+    `<section class="panel"><div class="filter-tabs">${[['all','全部记录'],['expense','成员垫付'],['income','团队收入']].map(([value,label])=>`<button data-filter-kind="${value}" class="${f.kind===value?'active':''}">${label}</button>`).join('')}</div><div class="filters"><input id="search-entries" placeholder="搜索用途、成员、备注…" value="${esc(f.text)}" aria-label="搜索账目"><select data-filter="currency" aria-label="筛选币种"><option value="all">全部币种</option>${options(state.conf.currencies,c=>c.code,c=>c.code,f.currency)}</select><select data-filter="payer" aria-label="筛选成员"><option value="all">全部成员</option>${options(state.members,m=>m.id,m=>m.name,f.payer)}</select><select data-filter="status" aria-label="筛选状态"><option value="all">全部（不含作废）</option>${options(Object.entries(STATUS),x=>x[0],x=>x[1],f.status)}</select><input type="date" data-filter="from" value="${esc(f.from)}" aria-label="开始日期"><input type="date" data-filter="to" value="${esc(f.to)}" aria-label="结束日期"></div><div id="ledger-results">${ledgerResults()}</div></section>`;
 }
 function reimbursementRows() {
   const tab=state.reimburseTab;
@@ -325,6 +481,7 @@ async function openDetail(id) {
     if(canManage()&&e.kind==='income'&&e.status==='posted')actions.push(`<button class="btn" data-action="distribute" data-id="${id}">标记已分红到个人账户</button>`);
     if(canManage()&&e.status==='pending')actions.push(`<button class="btn primary" data-action="pay" data-id="${id}">登记已付款</button>`);
     if(!e.reimbursed_minor&&!['reimbursed','voided'].includes(e.status)&&mine)actions.push(`<button class="btn danger" data-action="void" data-id="${id}">作废账目</button>`);
+    if(e.status==='voided'&&canManage())actions.push(`<button class="btn danger" data-delete-entry="${id}">永久删除</button>`);
     const actionNames={distribute:'将收入标记为已分红到个人账户',created:'创建了账目',submit:'将草稿记入账本',approve:'历史记录：通过',reject:'历史记录：退回',pay:'登记了报销付款',edited:'修改了账目',receipt:'上传了凭证',void:'作废了账目'};
     $('#detail-content').innerHTML=`<div class="modal-heading"><div><span class="eyebrow">ENTRY #${e.id}</span><h2>账目详情</h2></div><button class="icon-button" data-close aria-label="关闭">✕</button></div><div class="detail-hero">${entryIcon(e)}<div><h2>${e.kind==='income'?'+':'−'} ${money(e.amount,e.currency)}</h2>${settlementDisplay(e)}<p>${esc(e.description)}</p></div></div>${badge(entryStatus(e))}${e.status==='distributed'?'<p class="notice">已分红到个人账户，不计团队可用资金、报销预算或结余。</p>':''}${paymentSummary(e)}<dl class="detail-list"><div><dt>${e.kind==='income'?'经手成员':'垫付成员'}</dt><dd>${esc(e.payer_name)}</dd></div><div><dt>发生日期</dt><dd>${esc(e.date)}</dd></div><div><dt>记录来源</dt><dd>${esc(e.source)} · ${esc(e.creator_name)}</dd></div><div class="full-span"><dt>备注</dt><dd>${esc(e.note||'—')}</dd></div>${e.review_note?`<div class="full-span"><dt>处理 / 付款备注</dt><dd>${esc(e.review_note)}</dd></div>`:''}<div class="full-span"><dt>凭证</dt><dd>${e.receipt?`<a class="tiny-link" href="/api/entries/${id}/receipt" target="_blank" rel="noreferrer">下载 ${esc(e.receipt_name)} ↗</a>`:'未附凭证'}</dd></div></dl>${mine&&['draft','pending','posted','distributed'].includes(e.status)?`<label class="upload-zone"><input type="file" id="detail-receipt" data-id="${id}" accept="image/png,image/jpeg,application/pdf"><span>＋ ${e.receipt?'替换':'补充'}凭证 <small>PNG / JPG / PDF，最多 6 MB</small></span></label>`:''}${paymentHistory(e)}<h3>操作记录</h3><div class="timeline">${events.map(event=>`<div class="timeline-item">${esc(event.name)} ${esc(actionNames[event.action]||event.action)}${event.detail?`<br>${esc(event.detail)}`:''}<small>${esc(event.created_at.replace('T',' ').slice(0,19))}</small></div>`).join('')}</div><div class="detail-actions">${actions.join('')}</div>`;
   }catch(e){$('#detail-content').innerHTML=empty('加载失败',e.message);}
@@ -371,6 +528,10 @@ document.addEventListener('click',async event=>{
   const b=event.target.closest('button,a,tr');if(!b)return;
   if(b.hasAttribute('data-close')){b.closest('dialog').close();return;}
   if(b.hasAttribute('data-reload')){location.reload();return;}
+  if(b.id==='ai-launcher'||b.hasAttribute('data-ai-open')){event.preventDefault();openAi();return;}
+  if(b.hasAttribute('data-ai-confirm')){event.preventDefault();executeAiPlan();return;}
+  if(b.hasAttribute('data-ai-cancel-plan')){event.preventDefault();cancelAiPlan();return;}
+  if(b.hasAttribute('data-ai-edit-form')){event.preventDefault();aiEditInForm(Number(b.dataset.aiEditForm));return;}
   if(b.hasAttribute('data-new')){event.preventDefault();openEntry(b.dataset.new);return;}
   if(b.hasAttribute('data-export')){event.preventDefault();window.location.href='/api/export';return;}
   if(b.hasAttribute('data-income-link')){event.preventDefault();openEntry('income');return;}
@@ -381,6 +542,11 @@ document.addEventListener('click',async event=>{
   if(b.hasAttribute('data-entry')&&!event.target.closest('input,a,button')){openDetail(Number(b.dataset.entry));return;}
   if(b.hasAttribute('data-edit-entry')){const e=state.entries.find(e=>e.id===Number(b.dataset.editEntry));$('#detail-dialog').close();openEntry(e.kind,e);return;}
   if(b.hasAttribute('data-action')){openAction(b.dataset.action,[Number(b.dataset.id)]);return;}
+  if(b.hasAttribute('data-delete-entry')){
+    const id=Number(b.dataset.deleteEntry),e=state.entries.find(x=>x.id===id);if(!e)return;
+    if(!confirm(`确认永久删除 #${id}「${e.description}」？账目、操作记录和凭证将一并删除，无法恢复。`))return;
+    await busy(b,async()=>{try{await api(`/entries/${id}`,'DELETE');$('#detail-dialog').close();state.selected.delete(id);await refresh();toast(`已永久删除 #${id}`);}catch(err){toast(err.message,true);}});return;
+  }
   if(b.hasAttribute('data-remove-currency')){b.closest('.currency-edit-row').remove();updateCurrencySelects();return;}
   if(b.id==='add-currency'){$('#currency-rows').insertAdjacentHTML('beforeend',currencyEditorRow({code:'',name:'',symbol:'',decimals:2}));return;}
   if(b.id==='mobile-menu'){$('#sidebar').classList.toggle('open');return;}
@@ -409,6 +575,14 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('change',async event=>{
   const el=event.target;
+  if(el.dataset.aiSelect!==undefined){
+    const index=Number(el.dataset.aiSelect);el.checked?state.ai.selected.add(index):state.ai.selected.delete(index);
+    const count=aiSelected(),valid=state.ai.plan?state.ai.plan.actions.filter(a=>!a.errors?.length).length:0;
+    if($('#ai-plan-count'))$('#ai-plan-count').textContent=`${state.ai.plan?.actions?.length||0} 项 · 已选 ${count} 项`;
+    if($('#ai-selected-count'))$('#ai-selected-count').textContent=`已选 ${count} / ${valid} 项`;
+    const confirm=$('[data-ai-confirm]');if(confirm){confirm.textContent=`✅ 确认执行 ${count} 项`;confirm.disabled=!count;}
+    return;
+  }
   if(el.dataset.filter){state.filter[el.dataset.filter]=el.value;$('#ledger-results').innerHTML=ledgerResults();}
   if(el.dataset.select){const id=Number(el.dataset.select);el.checked?state.selected.add(id):state.selected.delete(id);if($('#batch-toolbar'))$('#batch-toolbar').innerHTML=batchToolbar();}
   if(el.id==='select-all'){$$('[data-select]').forEach(c=>{c.checked=el.checked;el.checked?state.selected.add(Number(c.dataset.select)):state.selected.delete(Number(c.dataset.select));});$('#batch-toolbar').innerHTML=batchToolbar();}
@@ -438,9 +612,7 @@ $('#action-form').addEventListener('submit',async event=>{event.preventDefault()
 }catch(e){$('#action-error').textContent=e.message;}});});
 document.addEventListener('submit',async event=>{
   const form=event.target;
-  if(form.id==='ai-form'){
-    event.preventDefault();await busy($('button',form),async()=>{try{$('#ai-error').textContent='';const data=await api('/ai/parse','POST',{text:form.elements.text.value});openEntry(data.kind,data);toast('请核对识别出的金额、币种和日期，再确认提交');}catch(e){$('#ai-error').textContent=e.message;}});
-  }
+  if(form.id==='ai-form'){event.preventDefault();await submitAi(form);}
   if(form.id==='calculator-form'){
     event.preventDefault();await busy($('button',form),async()=>{try{$('#calculator-error').textContent='';const data=await api('/calculate','POST',{...Object.fromEntries(new FormData(form)),base:state.base||state.conf.reference_currency});$('#calculator-result').innerHTML=calcSummary(data,true);$('#plan-table').innerHTML=planTable(data);$('#fx-details').innerHTML=rateDetails(data)+reportWarning(data);}catch(e){$('#calculator-error').textContent=e.message;}});
   }

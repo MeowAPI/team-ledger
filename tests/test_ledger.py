@@ -291,6 +291,25 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(report['income'],'0.00')
         self.assertEqual(report['cash'],'0.00')
 
+    def test_only_voided_entries_can_be_permanently_deleted(self):
+        e=self.entry(description='待删除')
+        self.assertEqual(self.client.delete(f'/api/entries/{e["id"]}',headers=self.headers).status_code,409)
+        self.assertEqual(self.action(e,'void','重复登记').status_code,200)
+        self.assertEqual(self.action(e,'pay','不可付款').status_code,409)
+        receipts=config.DATA/'receipts';receipts.mkdir(exist_ok=True)
+        (receipts/'deleted-receipt.png').write_bytes(b'png')
+        with db(write=True) as conn:
+            conn.execute('UPDATE entries SET receipt=? WHERE id=?',('deleted-receipt.png',e['id']))
+        response=self.client.delete(f'/api/entries/{e["id"]}',headers=self.headers)
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertNotIn(e['id'],[row['id'] for row in self.client.get('/api/entries').json()])
+        self.assertFalse((receipts/'deleted-receipt.png').exists())
+        with db() as conn:
+            self.assertIsNone(conn.execute('SELECT 1 FROM entries WHERE id=?',(e['id'],)).fetchone())
+            self.assertIsNone(conn.execute('SELECT 1 FROM events WHERE entry_id=?',(e['id'],)).fetchone())
+            self.assertIsNone(conn.execute('SELECT 1 FROM payments WHERE entry_id=?',(e['id'],)).fetchone())
+            self.assertIsNone(conn.execute('SELECT 1 FROM payment_quotes WHERE entry_id=?',(e['id'],)).fetchone())
+
     def test_fx_unavailable_is_explicit_and_same_currency_works(self):
         self.entry(kind='income',amount='100',currency='USD')
         with patch('app.fx.fetch_rates',side_effect=RuntimeError('offline')):

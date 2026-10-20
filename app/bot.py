@@ -1,11 +1,12 @@
 """Telegram long-polling worker with durable replies. One worker per database."""
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
 from fastapi import HTTPException
-from . import ai, config, fx
+from . import ai, ai_context, config, fx
 from .db import db, init_db, settings, set_setting
 from .bot_ui import (COMMANDS, DELIVERY, accepts_text, command_text, draft_for, handle,
                      queue, say, nav)
@@ -19,7 +20,7 @@ def process_update(update):
     msg = callback.get('message', {}) if callback else update.get('message', {})
     sender = callback.get('from', {}) if callback else msg.get('from', {})
     telegram_id, chat_id = str(sender.get('id', '')), str(msg.get('chat', {}).get('id', ''))
-    text = str(msg.get('text', '')).strip()[:2500] if not callback else ''
+    text = str(msg.get('text', '')).strip()[:4000] if not callback else ''
     with db() as conn:
         if conn.execute('SELECT 1 FROM tg_updates WHERE update_id=?', (update_id,)).fetchone():
             return
@@ -44,11 +45,21 @@ def process_update(update):
     authorized = bool(linked and authorized_chat and command != 'foreign' and not sender.get('is_bot'))
     wants_ai = not callback and (command == '/ai' and bool(argument) or not command and text and accepted and (not draft or draft['step'] == 'ai_text'))
     # External calls happen before taking the SQLite write lock.
+    progress_stop = progress_message = ledger_context = None
     if authorized and wants_ai:
         try:
-            result = ai.parse(argument if command == '/ai' else text, conf)
+            with db() as conn:
+                ledger_context = ai_context.build(conn, conf, dict(linked))
+        except Exception:
+            ledger_context = None
+        progress_stop, progress_message = progress_start(chat_id, msg.get('message_thread_id'))
+        try:
+            result = ai.parse(argument if command == '/ai' else text, conf, context=ledger_context)
         except HTTPException as exc:
             error = exc.detail
+        finally:
+            if progress_stop:
+                progress_stop.set()
     if authorized:
         codes.add(conf['default_currency'])
         if draft:
@@ -88,7 +99,7 @@ def process_update(update):
                 return
             conn.execute('SAVEPOINT handling')
             try:
-                handle(conn, update, result, error, rates)
+                handle(conn, update, result, error, rates, ledger_context)
             except HTTPException as exc:
                 conn.execute('ROLLBACK TO handling')
                 if callback:
@@ -99,6 +110,9 @@ def process_update(update):
             conn.execute('INSERT INTO tg_updates VALUES (?,?)', (update_id, config.now()))
             set_setting(conn, 'bot_offset', update_id + 1)
             set_setting(conn, 'bot_heartbeat', int(time.time()))
+            if progress_message:
+                # Remove the transient "thinking" bubble after the real reply is queued.
+                queue(conn, 'deleteMessage', {'chat_id': chat_id, 'message_id': progress_message})
     finally:
         DELIVERY.reset(context)
 
@@ -131,6 +145,45 @@ def api(method, payload):
     except Exception:
         # Request URLs contain the token. Never log the original urllib exception.
         raise TelegramError() from None
+
+
+def progress_start(chat_id, thread_id=None):
+    """Best-effort "AI is thinking" feedback. Never blocks or breaks processing."""
+    if not os.getenv('TELEGRAM_BOT_TOKEN'):
+        return None, None
+    payload = {'chat_id': chat_id,
+               'text': '🤖 收到，正在理解你的描述…\n☕ 内容较多时可能要十几秒，请稍等。'}
+    if thread_id:
+        payload['message_thread_id'] = thread_id
+    message_id = None
+    try:
+        sent = api('sendMessage', payload)
+        message_id = sent.get('message_id') if isinstance(sent, dict) else None
+    except Exception:
+        pass
+    stop = threading.Event()
+
+    def keep_typing():
+        ticks = 0
+        while not stop.wait(4):
+            ticks += 1
+            try:
+                action = {'chat_id': chat_id, 'action': 'typing'}
+                if thread_id:
+                    action['message_thread_id'] = thread_id
+                api('sendChatAction', action)
+            except Exception:
+                return
+            if ticks == 4 and message_id:
+                # Reassure the user when a large paragraph takes longer.
+                try:
+                    api('editMessageText', {'chat_id': chat_id, 'message_id': message_id,
+                                            'text': '🤖 还在整理这段描述，马上就好…\n⏳ 已收到，请不要重复发送。'})
+                except Exception:
+                    pass
+
+    threading.Thread(target=keep_typing, daemon=True).start()
+    return stop, message_id
 
 
 def drain_outbox():

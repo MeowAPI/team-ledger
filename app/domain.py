@@ -269,6 +269,21 @@ def transition(conn, user, entry_id, action, note='', *, amount=None, payment_ke
     return entry_view(conn, entry_id)
 
 
+def delete_entry(conn, user, entry_id):
+    admin(user)
+    row = conn.execute('SELECT id,status,receipt FROM entries WHERE id=?', (entry_id,)).fetchone()
+    if not row:
+        fail('账目不存在', 404)
+    if row['status'] != 'voided':
+        fail('仅已作废账目可以永久删除', 409)
+    # Remove all related rows; callers delete the receipt file after commit.
+    conn.execute('DELETE FROM payment_quotes WHERE entry_id=?', (entry_id,))
+    conn.execute('DELETE FROM payments WHERE entry_id=?', (entry_id,))
+    conn.execute('DELETE FROM events WHERE entry_id=?', (entry_id,))
+    conn.execute('DELETE FROM entries WHERE id=?', (entry_id,))
+    return row['receipt']
+
+
 def edit_entry(conn, user, entry_id, body):
     old = entry_view(conn, entry_id)
     if old['kind'] != 'expense' or old['status'] not in ('draft', 'pending') or old['reimbursed_minor']:

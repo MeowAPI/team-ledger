@@ -15,10 +15,11 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from . import config, ai, fx
+from . import config, ai, ai_context, ai_plan, fx
 from .db import db, init_db, settings
 from .domain import (fail, admin, owner, public_user, hash_password, verify_password,
-                     text_value, add_entry, edit_entry, transition, entry_view, audit, save_settings, make_payment_quote)
+                     text_value, add_entry, delete_entry as remove_entry, edit_entry, transition, entry_view, audit,
+                     save_settings, make_payment_quote)
 
 PUBLIC = config.ROOT / 'public'
 DUMMY_HASH = hash_password('unused-dummy-password')
@@ -274,6 +275,16 @@ def update_entry(entry_id: int, body: dict, request: Request):
         return edit_entry(conn, user, entry_id, body)
 
 
+@app.delete('/api/entries/{entry_id}')
+def delete_entry(entry_id: int, request: Request):
+    user = current(request)
+    with db(write=True) as conn:
+        receipt = remove_entry(conn, user, entry_id)
+    if receipt:
+        (config.DATA / 'receipts' / Path(receipt).name).unlink(missing_ok=True)
+    return {'ok': True}
+
+
 @app.post('/api/entries/action')
 def entry_action(body: dict, request: Request):
     user = current(request)
@@ -410,6 +421,38 @@ def ai_parse(body: dict, request: Request):
     from .domain import normalized_entry
     with db() as conn:
         normalized_entry(conn, user, result)
+    return result
+
+
+@app.post('/api/ai/plan')
+def ai_plan_preview(body: dict, request: Request):
+    user = current(request)
+    limited(request, 'ai', 20)
+    text = text_value(body.get('text'), '记账内容', 4000)
+    history = body.get('history')
+    if not isinstance(history, list):
+        history = []
+    with db() as conn:
+        conf = settings(conn)
+        context = ai_context.build(conn, conf, user)
+    raw = ai.plan(text, conf, context, history)
+    with db(write=True) as conn:
+        conf = settings(conn)
+        rates = ai_plan.needed_rates(conn, conf, raw)
+        plan = ai_plan.resolve(conn, user, conf, raw, context, rates)
+        return ai_plan.store(conn, user, plan, 'web')
+
+
+@app.post('/api/ai/execute')
+def ai_execute(body: dict, request: Request):
+    user = current(request)
+    key = request.headers.get('idempotency-key', '')
+    if not re.fullmatch('[A-Za-z0-9_-]{16,100}', key):
+        fail('缺少有效的防重复提交标识')
+    with db(write=True) as conn:
+        result = ai_plan.execute(conn, user, body.get('plan_id'), body.get('actions'))
+    for name in result.pop('receipts', []):
+        (config.DATA / 'receipts' / Path(name).name).unlink(missing_ok=True)
     return result
 
 

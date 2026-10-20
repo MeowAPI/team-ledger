@@ -69,6 +69,10 @@ CREATE TABLE IF NOT EXISTS tg_prompts (
  token TEXT NOT NULL, step TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(chat_id,message_id));
 CREATE TABLE IF NOT EXISTS fx_cache (
  base TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ai_plans (
+ id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), source TEXT NOT NULL,
+ payload TEXT NOT NULL, created_at TEXT NOT NULL, expires INTEGER NOT NULL,
+ executed_at TEXT, result TEXT);
 '''
 
 
