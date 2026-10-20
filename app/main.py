@@ -350,7 +350,7 @@ def upload_receipt(entry_id: int, body: dict, request: Request):
             fail('账目不存在', 404)
         if entry['payer_id'] != user['id']:
             admin(user)
-        if entry['status'] not in ('draft', 'pending', 'posted'):
+        if entry['status'] not in ('draft', 'pending', 'posted', 'distributed'):
             fail('已报销或已作废的账目不能替换凭证', 409)
         folder = config.DATA / 'receipts'
         folder.mkdir(exist_ok=True)

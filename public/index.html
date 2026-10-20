@@ -39,6 +39,7 @@
     <div class="segmented" id="entry-kind"><button type="button" data-kind="expense" class="active">成员垫付</button><button type="button" data-kind="income">团队收入</button></div>
     <div class="form-grid"><label class="amount-field">金额<input name="amount" placeholder="0.00" inputmode="decimal" required autocomplete="off"></label><label>币种<select name="currency" required></select></label></div>
     <label>用途 / 收入说明<input name="description" placeholder="这笔钱用在了哪里？" maxlength="120" required></label>
+    <label id="income-state-label" hidden>收入归属<select name="income_state"><option value="posted">团队在账 · 计入可用资金</option><option value="distributed">已分红到个人账户 · 不计团队资金</option></select></label>
     <label>发生日期<input name="date" type="date" required></label>
     <label id="payer-label">垫付成员<select name="payer_id"></select></label><label>备注 <span class="optional">选填</span><textarea name="note" rows="2" maxlength="1000" placeholder="补充项目、商家或其他信息"></textarea></label>
     <label class="upload-zone"><input type="file" name="receipt" accept="image/png,image/jpeg,application/pdf"><span id="upload-label">＋ 添加发票或凭证 <small>PNG / JPG / PDF，最多 6 MB</small></span></label>

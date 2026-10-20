@@ -97,11 +97,13 @@ def normalized_entry(conn, user, body):
         admin(user)
     if not conn.execute('SELECT id FROM users WHERE id=? AND active=1', (payer_id,)).fetchone():
         fail('成员不存在或已停用')
-    status = body.get('status', 'pending') if kind == 'expense' else 'posted'
+    status = body.get('status', 'pending') if kind == 'expense' else body.get('status', 'posted')
+    if kind == 'income' and status == 'pending':
+        status = 'posted'  # Existing forms used pending for income.
     if status == 'submitted':
         status = 'pending'  # Older open forms and persisted Telegram drafts remain usable.
-    if status not in (('draft', 'pending') if kind == 'expense' else ('posted',)):
-        fail('新支出只能保存为草稿或待报销账目')
+    if status not in (('draft', 'pending') if kind == 'expense' else ('posted', 'distributed')):
+        fail('支出请选择草稿或待报销，收入请选择团队在账或已分红')
     return {'kind': kind, 'amount_minor': amount, 'currency': cur['code'], 'decimals': cur['decimals'],
             'description': description, 'category': '', 'date': entry_date.isoformat(),
             'payer_id': payer_id, 'status': status, 'note': text_value(body.get('note', ''), '备注', 1000, False)}
@@ -236,6 +238,14 @@ def transition(conn, user, entry_id, action, note='', *, amount=None, payment_ke
         note = text_value(note, '作废原因', 500)
         conn.execute('UPDATE entries SET status=?,review_note=?,updated_at=? WHERE id=?', ('voided', note, now(), entry_id))
         audit(conn, entry_id, user['id'], 'void', note)
+        return entry_view(conn, entry_id)
+    if action == 'distribute':
+        admin(user)
+        if entry['kind'] != 'income' or entry['status'] != 'posted':
+            fail('只有团队在账收入可以标记已分红，请刷新后核对', 409)
+        note = text_value(note, '分红说明', 500)
+        conn.execute('UPDATE entries SET status=?,review_note=?,updated_at=? WHERE id=?', ('distributed', note, now(), entry_id))
+        audit(conn, entry_id, user['id'], 'distribute', note)
         return entry_view(conn, entry_id)
     if entry['kind'] != 'expense':
         fail('收入无需报销')

@@ -29,6 +29,9 @@ def process_update(update):
         linked = conn.execute('SELECT u.id FROM tg_links t JOIN users u ON u.id=t.user_id WHERE t.telegram_id=? AND u.active=1', (telegram_id,)).fetchone()
         draft = draft_for(conn, telegram_id, chat_id)
         accepted = accepts_text(conn, msg, telegram_id, chat_id, draft)
+        callback_data = callback.get('data', '') if callback else ''
+        payload = json.loads(draft['payload']) if draft else {}
+        funds_flow = command == '/funds' or callback_data == 'funds' or callback_data.startswith('f:') or (payload.get('_flow') == 'funds' and ((not callback and not command and accepted) or callback_data == f'd:{draft["token"]}:resume'))
         codes = {r['currency'] for r in conn.execute('SELECT DISTINCT currency FROM entries')}
         payment_code = None
         if callback and draft:
@@ -37,7 +40,7 @@ def process_update(update):
             if len(parts) == 4 and parts[:3] == ['d', draft['token'], 'paycur'] and payload.get('_action') == 'pay':
                 row = conn.execute('SELECT currency FROM entries WHERE id=?', (payload['_entry_id'],)).fetchone()
                 payment_code = row['currency'] if row else None
-    result, error, rates, report = None, None, None, None
+    result, error, rates = None, None, None
     authorized = bool(linked and authorized_chat and command != 'foreign' and not sender.get('is_bot'))
     wants_ai = not callback and (command == '/ai' and bool(argument) or not command and text and accepted and (not draft or draft['step'] == 'ai_text'))
     # External calls happen before taking the SQLite write lock.
@@ -52,17 +55,28 @@ def process_update(update):
             codes.add(json.loads(draft['payload']).get('currency', conf['default_currency']))
         if result:
             codes.add(result.get('currency', conf['default_currency']))
+        if funds_flow:
+            # Only posted income, outstanding expenses and actual payments affect
+            # this calculator. Draft/voided currencies must not block the plan.
+            with db() as conn:
+                codes = {r['currency'] for r in conn.execute("SELECT currency FROM entries WHERE status IN ('posted','pending','reimbursed') UNION SELECT currency FROM payments")}
+            fund_action = callback_data.split(':')[2] if callback_data.startswith('f:') and len(callback_data.split(':')) > 2 else ''
+            if payload.get('scenario') and fund_action not in ('refresh', 'cancel', 'batch', 'mode') and command != '/funds' and callback_data != 'funds':
+                codes.add(payload['scenario']['currency'])
+            if payload.get('scenario_currency') and draft and draft['step'] == 'funds_amount' and not callback:
+                codes.add(payload['scenario_currency'])
         if payment_code:
             # A payment quote only needs this entry's pair. Other ledger/default
             # currencies must not block a supported settlement-currency payment.
             codes = {payment_code}
-        callback_data = callback.get('data', '') if callback else ''
         wants_rates = callback and (callback_data.startswith(('list:', 'e:', 'd:', 'edit:')) or callback_data in ('summary', 'funds'))
-        if wants_rates or command in ('/summary', '/team', '/recent', '/funds') or result or (draft and draft['step'].startswith(('edit_', 'description'))):
+        frozen_funds = funds_flow and draft and payload.get('_flow') == 'funds' and (
+            callback_data.startswith(f'f:{draft["token"]}:') and fund_action in ('plan', 'receipt', 'note', 'commit')
+            or callback_data == f'd:{draft["token"]}:resume' and draft['step'] in ('funds_confirm', 'funds_note', 'funds_receipt')
+            or not callback and not command and draft['step'] == 'funds_note')
+        if not frozen_funds and (funds_flow or wants_rates or command in ('/summary', '/team', '/recent', '/funds') or result or (draft and draft['step'].startswith(('edit_', 'description')))):
             try:
                 rates = fx.rates_for(conf['reference_currency'], codes)
-                if command == '/funds' or (callback and callback.get('data') == 'funds'):
-                    report = fx.report()
             except Exception:
                 rates = None
     context = DELIVERY.set({'callback': bool(callback), 'message_id': msg.get('message_id'),
@@ -74,7 +88,7 @@ def process_update(update):
                 return
             conn.execute('SAVEPOINT handling')
             try:
-                handle(conn, update, result, error, rates, report)
+                handle(conn, update, result, error, rates)
             except HTTPException as exc:
                 conn.execute('ROLLBACK TO handling')
                 if callback:

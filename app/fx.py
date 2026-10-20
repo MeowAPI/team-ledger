@@ -77,7 +77,12 @@ def calculate(entries, conf, fx, scenario=None, payments=None):
     for entry, factor in [(e, 1) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'] + [(p, -1) for p in payments]:
         key = entry['currency']
         balances[key] = balances.get(key, Decimal(0)) + factor * Decimal(entry['amount_minor']) / (10 ** entry['decimals'])
-    common = {'base': base, 'fx': fx, 'balances': {k: str(v) for k, v in balances.items()},
+    distributed = {}
+    for e in entries:
+        if e['kind'] == 'income' and e['status'] == 'distributed':
+            code = e['currency']
+            distributed[code] = str(Decimal(distributed.get(code, '0')) + Decimal(e['amount_minor']) / (10 ** e['decimals']))
+    common = {'distributed_balances': distributed, 'base': base, 'fx': fx, 'balances': {k: str(v) for k, v in balances.items()},
               'complete': not fx['missing'], 'scenario': scenario, 'members': []}
     if fx['missing']:
         return common
