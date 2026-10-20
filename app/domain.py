@@ -102,8 +102,8 @@ def normalized_entry(conn, user, body):
         status = 'posted'  # Existing forms used pending for income.
     if status == 'submitted':
         status = 'pending'  # Older open forms and persisted Telegram drafts remain usable.
-    if status not in (('draft', 'pending') if kind == 'expense' else ('posted', 'distributed')):
-        fail('支出请选择草稿或待报销，收入请选择团队在账或已分红')
+    if status not in (('draft', 'pending') if kind == 'expense' else ('posted',)):
+        fail('支出请选择草稿或待报销；收入正常入账，分红请到盈余分红登记')
     return {'kind': kind, 'amount_minor': amount, 'currency': cur['code'], 'decimals': cur['decimals'],
             'description': description, 'category': '', 'date': entry_date.isoformat(),
             'payer_id': payer_id, 'status': status, 'note': text_value(body.get('note', ''), '备注', 1000, False)}
@@ -240,13 +240,7 @@ def transition(conn, user, entry_id, action, note='', *, amount=None, payment_ke
         audit(conn, entry_id, user['id'], 'void', note)
         return entry_view(conn, entry_id)
     if action == 'distribute':
-        admin(user)
-        if entry['kind'] != 'income' or entry['status'] != 'posted':
-            fail('只有团队在账收入可以标记已分红，请刷新后核对', 409)
-        note = text_value(note, '分红说明', 500)
-        conn.execute('UPDATE entries SET status=?,review_note=?,updated_at=? WHERE id=?', ('distributed', note, now(), entry_id))
-        audit(conn, entry_id, user['id'], 'distribute', note)
-        return entry_view(conn, entry_id)
+        fail('按收入标记分红的规则已移除，请到盈余分红登记', 409)
     if entry['kind'] != 'expense':
         fail('收入无需报销')
     if action == 'pay':
@@ -315,13 +309,13 @@ def save_settings(conn, user, body):
         decimals = cur.get('decimals', 2)
         if type(decimals) is not int or decimals not in (0, 2, 3, 4) or code in codes:
             fail('币种不能重复，小数位支持 0、2、3、4')
-        used = conn.execute('SELECT decimals FROM entries WHERE currency=? UNION ALL SELECT decimals FROM payments WHERE currency=? LIMIT 1', (code, code)).fetchone()
+        used = conn.execute('SELECT decimals FROM entries WHERE currency=? UNION ALL SELECT decimals FROM payments WHERE currency=? UNION ALL SELECT decimals FROM dividends WHERE currency=? LIMIT 1', (code, code, code)).fetchone()
         if used and used['decimals'] != decimals:
             fail(f'{code} 已有账目，不能修改其小数位')
         codes.add(code)
         clean.append({'code': code, 'decimals': decimals, 'name': text_value(cur.get('name', code), '币种名称', 20),
                       'symbol': text_value(cur.get('symbol', code), '货币符号', 8)})
-    for row in conn.execute('SELECT currency FROM entries UNION SELECT currency FROM payments'):
+    for row in conn.execute('SELECT currency FROM entries UNION SELECT currency FROM payments UNION SELECT currency FROM dividends'):
         if row['currency'] not in codes:
             fail(f'{row["currency"]} 已有账目，不能移除')
     default = body.get('default_currency', conf['default_currency'])

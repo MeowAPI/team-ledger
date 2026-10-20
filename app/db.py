@@ -52,6 +52,16 @@ CREATE TABLE IF NOT EXISTS payment_quotes (
  version INTEGER NOT NULL, currency TEXT NOT NULL, decimals INTEGER NOT NULL,
  rate TEXT NOT NULL, rate_date TEXT, remaining_minor INTEGER NOT NULL, maximum_minor INTEGER NOT NULL,
  expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS dividends (
+ id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
+ amount_minor INTEGER NOT NULL CHECK(amount_minor>0), currency TEXT NOT NULL, decimals INTEGER NOT NULL,
+ note TEXT NOT NULL, reference_currency TEXT NOT NULL, fx_rate TEXT NOT NULL, fx_date TEXT,
+ quote_id TEXT NOT NULL UNIQUE, source_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS dividend_quotes (
+ id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), fingerprint TEXT NOT NULL,
+ currency TEXT NOT NULL, decimals INTEGER NOT NULL, rate TEXT NOT NULL, rate_date TEXT,
+ reference_currency TEXT NOT NULL, maximum_minor INTEGER NOT NULL, surplus TEXT NOT NULL,
+ rates TEXT NOT NULL, expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS tg_links (
  telegram_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS link_codes (
@@ -112,6 +122,13 @@ def init_db():
                 e.amount_minor,e.currency,e.decimals,e.review_note,e.amount_minor,'1',NULL,'legacy:pay:'||e.id,COALESCE(e.paid_at,e.updated_at)
             FROM entries e WHERE e.kind='expense' AND e.status='reimbursed' AND e.reimbursed_minor=0""")
         conn.execute("UPDATE entries SET reimbursed_minor=amount_minor WHERE kind='expense' AND status='reimbursed' AND reimbursed_minor=0")
+        # Retire income exclusion while preserving the exact prior cash effect.
+        conn.execute("""INSERT OR IGNORE INTO dividends(user_id,amount_minor,currency,decimals,note,reference_currency,fx_rate,fx_date,quote_id,source_key,created_at)
+            SELECT COALESCE((SELECT user_id FROM events WHERE entry_id=e.id AND action='distribute' ORDER BY id DESC LIMIT 1),e.created_by),
+                e.amount_minor,e.currency,e.decimals,COALESCE(NULLIF(e.review_note,''),'旧版分红记录转换'),e.currency,'1',NULL,
+                'legacy:dividend:'||e.id,'legacy:dividend:'||e.id,e.updated_at
+            FROM entries e WHERE e.kind='income' AND e.status='distributed'""")
+        conn.execute("UPDATE entries SET status='posted' WHERE kind='income' AND status='distributed'")
         conn.execute("UPDATE users SET role='owner' WHERE role<>'owner'")
         conn.execute("DELETE FROM settings WHERE key='categories'")
         # Retire the approval workflow without changing amounts, payment data or history.

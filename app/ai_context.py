@@ -85,7 +85,8 @@ def funds(conf):
     if not report.get('complete'):
         return {'complete': False, 'base': report.get('base'),
                 'warning': report.get('fx', {}).get('warning') or '汇率不完整'}
-    keys = ('base', 'income', 'paid', 'cash', 'due', 'reserve', 'payable', 'remaining', 'shortage')
+    keys = ('base', 'income', 'paid', 'dividend_paid', 'dividend_available', 'cash', 'due',
+            'reserve', 'payable', 'remaining', 'shortage')
     return {key: report.get(key) for key in keys}
 
 

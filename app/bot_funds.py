@@ -40,11 +40,9 @@ def show(conn, chat_id, token, payload, rates, page=0):
         scenario = payload['scenario']
         lines += ['⚗️ 模拟进账：' + amount_text(scenario['amount'], scenario['currency'], conf) + ' ≈ ' + fmt(result['extra']),
                   '以下含模拟收入，仅作试算；尚未入账。', '原账本可用资金：' + fmt(Decimal(result['cash']) - Decimal(result['extra']))]
-    if result.get('distributed_balances'):
-        lines.append('已分红收入（不计团队资金）：' + ' / '.join(amount_text(v, c, conf) for c, v in list(result['distributed_balances'].items())[:6]))
     for key, label in [('cash', '当前可用资金' if not payload.get('scenario') else '模拟后可用资金'),
                        ('due', '全部待报销'), ('reserve', '建议预留报销'), ('payable', '当前可安排付款'),
-                       ('remaining', '预留报销后结余'), ('shortage', '还需补充的资金')]:
+                       ('remaining', '预留报销后结余'), ('dividend_paid', '累计盈余分红'), ('dividend_available', '可分红盈余'), ('shortage', '还需补充的资金')]:
         lines.append(label + '：' + fmt(result[key]))
     projects = sorted([(m, e) for m in result['members'] for e in m['entries'] if Decimal(e['suggested']) > 0], key=lambda pair: (pair[1]['date'], pair[1]['id']))
     page, total, selected = pages(projects, page)
@@ -58,7 +56,7 @@ def show(conn, chat_id, token, payload, rates, page=0):
     if not projects:
         lines.append('暂无可安排的付款项目。')
     dates = sorted({r['date'] for r in result['fx']['rates'].values() if r.get('date')})
-    lines.append('\n可用资金 = 团队在账收入 − 实际已报销付款；优先覆盖待报销。\n每日参考汇率' + (' · ' + ' / '.join(dates) if dates else '') + '，仅供规划。')
+    lines.append('\n可用资金 = 团队收入 − 已报销 − 已分红；先预留待报销，剩余才可分红。\n每日参考汇率' + (' · ' + ' / '.join(dates) if dates else '') + '，仅供规划。')
     if result['fx'].get('warning'):
         lines.append(result['fx']['warning'])
     rows += paging(token, 'view', page, total)
@@ -67,7 +65,7 @@ def show(conn, chat_id, token, payload, rates, page=0):
         rows += [[button('＋ 将这笔真实进账记入账本', f'f:{token}:income')]]
     if Decimal(result['due']) > 0:
         rows += [[button('💳 按实际余额一键报销', f'f:{token}:batch')]]
-    rows += [[button('全部待报销项目', 'list:plan:0')], nav()]
+    rows += [[button('盈余分红 / 分红记录', 'dividends'), button('全部待报销项目', 'list:plan:0')], nav()]
     say(conn, chat_id, '\n'.join(lines), rows, edit=True)
 
 

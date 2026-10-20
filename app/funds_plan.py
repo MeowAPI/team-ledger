@@ -13,27 +13,29 @@ DEFAULT_NOTE = '按资金建议批量登记报销'
 def ledger_rows(conn):
     entries = [dict(e) for e in conn.execute('SELECT e.*,u.name payer_name FROM entries e JOIN users u ON u.id=e.payer_id ORDER BY e.id')]
     payments = [dict(p) for p in conn.execute('SELECT * FROM payments ORDER BY id')]
-    return entries, payments
+    dividends = [dict(d) for d in conn.execute('SELECT * FROM dividends ORDER BY id')]
+    return entries, payments, dividends
 
 
 def snapshot(conn):
     conf = settings(conn)
-    entries, payments = ledger_rows(conn)
-    return hashlib.sha256(json.dumps([entries, payments, conf['reference_currency'], conf['currencies']], sort_keys=True).encode()).hexdigest()
+    entries, payments, dividends = ledger_rows(conn)
+    return hashlib.sha256(json.dumps([entries, payments, dividends, conf['reference_currency'], conf['currencies']], sort_keys=True).encode()).hexdigest()
 
 
 def report(conn, rates, scenario=None):
     conf = settings(conn)
     if not rates or rates['base'] != conf['reference_currency']:
         return None
-    entries, payments = ledger_rows(conn)
+    entries, payments, dividends = ledger_rows(conn)
     needed = {e['currency'] for e in entries if e['status'] in ('pending', 'reimbursed', 'posted')}
     needed.update(p['currency'] for p in payments)
+    needed.update(d['currency'] for d in dividends)
     if scenario:
         needed.add(scenario['currency'])
     if needed - rates['rates'].keys():
         return None
-    return fx.calculate(entries, conf, rates, scenario, payments)
+    return fx.calculate(entries, conf, rates, scenario, payments, dividends)
 
 
 def build_plan(conn, user, rates, mode, *, payer_id=None, entry_ids=None, date_from=None, date_to=None, note=DEFAULT_NOTE):
@@ -48,10 +50,10 @@ def build_plan(conn, user, rates, mode, *, payer_id=None, entry_ids=None, date_f
         fail('暂无完整有效汇率，请刷新资金计算后重试。')
     base = conf['reference_currency']
     scale = 10 ** currency(conf, base)['decimals']
-    entries, payments = ledger_rows(conn)
+    entries, payments, dividends = ledger_rows(conn)
     def converted(e):
         return Decimal(e['amount_minor']) / (10 ** e['decimals']) * Decimal(rates['rates'][e['currency']]['rate'])
-    cash = sum((converted(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'), Decimal(0)) - sum((converted(p) for p in payments), Decimal(0))
+    cash = sum((converted(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'), Decimal(0)) - sum((converted(p) for p in payments + dividends), Decimal(0))
     left = max(cash, Decimal(0)).quantize(Decimal(1) / scale, rounding=ROUND_DOWN)
     want_ids = {int(i) for i in entry_ids} if entry_ids else None
     items, totals, cost = [], {}, Decimal(0)

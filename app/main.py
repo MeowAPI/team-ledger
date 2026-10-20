@@ -15,11 +15,11 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from . import config, ai, ai_context, ai_plan, fx
+from . import config, ai, ai_context, ai_plan, dividends, fx
 from .db import db, init_db, settings
 from .domain import (fail, admin, owner, public_user, hash_password, verify_password,
                      text_value, add_entry, delete_entry as remove_entry, edit_entry, transition, entry_view, audit,
-                     save_settings, make_payment_quote)
+                     save_settings, make_payment_quote, currency)
 
 PUBLIC = config.ROOT / 'public'
 DUMMY_HASH = hash_password('unused-dummy-password')
@@ -334,6 +334,36 @@ def payment_quotes(body: dict, request: Request):
         return [make_payment_quote(conn, user, entry_id, code, rates) for entry_id in ids]
 
 
+@app.get('/api/dividends')
+def dividend_history(request: Request):
+    current(request)
+    with db() as conn:
+        return dividends.history(conn)
+
+
+@app.post('/api/dividends/quote')
+def dividend_quote(body: dict, request: Request):
+    user = current(request)
+    with db() as conn:
+        conf = settings(conn)
+        code = body.get('currency', conf['reference_currency'])
+        currency(conf, code)
+        codes = dividends.needed_codes(conn) | {code}
+    rates = fx.rates_for(conf['reference_currency'], codes)
+    with db(write=True) as conn:
+        return dividends.quote(conn, user, code, rates)
+
+
+@app.post('/api/dividends')
+def create_dividend(body: dict, request: Request):
+    user = current(request)
+    key = request.headers.get('idempotency-key', '')
+    if not re.fullmatch('[A-Za-z0-9_-]{16,100}', key):
+        fail('缺少分红防重复标识，请刷新后重试')
+    with db(write=True) as conn:
+        return dividends.record(conn, user, body.get('quote_id'), body.get('amount'), body.get('note', ''), f'dividend:web:{user["id"]}:{key}')
+
+
 @app.get('/api/entries/{entry_id}/events')
 def events(entry_id: int, request: Request):
     current(request)
@@ -361,7 +391,7 @@ def upload_receipt(entry_id: int, body: dict, request: Request):
             fail('账目不存在', 404)
         if entry['payer_id'] != user['id']:
             admin(user)
-        if entry['status'] not in ('draft', 'pending', 'posted', 'distributed'):
+        if entry['status'] not in ('draft', 'pending', 'posted'):
             fail('已报销或已作废的账目不能替换凭证', 409)
         folder = config.DATA / 'receipts'
         folder.mkdir(exist_ok=True)
@@ -497,6 +527,7 @@ def export(request: Request):
     current(request)
     with db() as conn:
         rows = [entry_view(conn, r['id']) for r in conn.execute('SELECT id FROM entries ORDER BY date,id').fetchall()]
+        dividend_rows = dividends.history(conn)
     output = io.StringIO()
     output.write('\ufeff')
     writer = csv.writer(output)
@@ -512,6 +543,10 @@ def export(request: Request):
         writer.writerow([row['id'], row['kind'], row['date'], safe(row['description']), safe(row['payer_name']),
                          amount, row['currency'], '部分报销' if row['status'] == 'pending' and row['reimbursed_minor'] else row['status'], row['source'], safe(row['note']), safe(row['review_note']), row['paid_at'], paid, due,
                          safe(json.dumps(row['payments'], ensure_ascii=False)) if row['payments'] else ''])
+    for row in reversed(dividend_rows):
+        writer.writerow(['D'+str(row['id']), 'dividend', row['created_at'][:10], '盈余分红', safe(row['name']),
+                         row['amount'], row['currency'], '已分红', 'ledger', safe(row['note']), '', row['created_at'], '', '',
+                         safe(json.dumps({k:row[k] for k in ('reference_currency','fx_rate','fx_date')}, ensure_ascii=False))])
     return StreamingResponse(iter([output.getvalue()]), media_type='text/csv; charset=utf-8',
                              headers={'Content-Disposition': 'attachment; filename="team-ledger.csv"'})
 
