@@ -72,6 +72,10 @@ def entry_status(entry):
     return '部分报销' if entry['status'] == 'pending' and entry['reimbursed_minor'] else STATUS[entry['status']]
 
 
+def entry_description(entry):
+    return entry.get('description') or '未填写说明'
+
+
 def payment_totals(entry, conf):
     return f'累计已报：{amount_text(entry["reimbursed_amount"],entry["currency"],conf)}\n剩余待报：{amount_text(entry["remaining_amount"],entry["currency"],conf)}'
 
@@ -109,7 +113,7 @@ def menu(conn, user, chat_id):
 
 def help_menu(conn, chat_id):
     say(conn, chat_id, '📖 使用帮助\n\n'
-        '记账：点成员垫付 / 团队收入。预览可修改金额、币种、日期、用途、备注和成员。\n'
+        '记账：点成员垫付 / 团队收入，选币种、输入金额即可预览；用途、备注选填。预览可修改金额、币种、日期、用途、备注和成员，编辑用途或备注时发送 - 清空。\n'
         '🤖 AI：私聊直接说「昨天打车花了35元」，群里使用 /ai 记账内容；也可以一次说一段话，核对清单后才入账。\n'
         '查账：最近账目、个人与团队待报销均可翻页，点项目查看详情。\n'
         '报销：待报销详情可分次登记；/funds 可模拟进账、查看具体项目，按实际余额一键登记多笔报销。\n'
@@ -123,6 +127,7 @@ def new_draft(conn, user, telegram_id, chat_id, payload=None, step=None):
     token = secrets.token_hex(5)
     step = step or ('confirm' if payload else 'currency')
     payload = dict(payload) if payload else {'kind': 'expense', 'date': config.today(), 'note': '', 'status': 'pending'}
+    payload.setdefault('description', '')
     payload.setdefault('payer_id', user['id'])
     conn.execute('INSERT INTO tg_drafts VALUES (?,?,?,?,?,?,?)',
                  (token, telegram_id, chat_id, user['id'], step, json.dumps(payload, ensure_ascii=False), int(time.time()) + 3600))
@@ -153,14 +158,14 @@ def ask(conn, chat_id, draft, step, text):
 
 def show_currencies(conn, chat_id, token, conf):
     buttons = [button(c['code'] + ' ' + c['name'], f'd:{token}:cur:{c["code"]}') for c in conf['currencies']]
-    say(conn, chat_id, '1/3 · 选择币种', [buttons[i:i+2] for i in range(0, len(buttons), 2)] + [[button('取消', f'd:{token}:cancel')]], edit=True)
+    say(conn, chat_id, '选择币种，输入金额后即可预览；用途、备注选填。', [buttons[i:i+2] for i in range(0, len(buttons), 2)] + [[button('取消', f'd:{token}:cancel')]], edit=True)
 
 
 def preview(conn, chat_id, token, data, rates=None):
     conf = settings(conn)
     payer = conn.execute('SELECT name FROM users WHERE id=?', (data.get('payer_id'),)).fetchone()
     kind = '团队收入' if data['kind'] == 'income' else '成员垫付 · 待报销'
-    lines = [f'🧾 确认{kind}', f'用途：{data["description"]}', f'金额：{amount_text(data["amount"],data["currency"],conf)}']
+    lines = [f'🧾 确认{kind}', f'用途：{entry_description(data)}', f'金额：{amount_text(data["amount"],data["currency"],conf)}']
     converted = reference(data['amount'], data['currency'], conf, rates)
     if converted:
         lines.append(converted)
@@ -203,11 +208,11 @@ def list_entries(conn, user, chat_id, scope='recent', page=0, rates=None):
     for row in ids:
         entry = entry_view(conn, row['id'])
         converted = reference(entry['amount'], entry['currency'], conf, rates)
-        lines.append(f'\n#{entry["id"]} {entry["description"]}\n{original(entry,conf)} · {entry_status(entry)}\n'
+        lines.append(f'\n#{entry["id"]} {entry_description(entry)}\n{original(entry,conf)} · {entry_status(entry)}\n'
                      f'{entry["payer_name"]} · {entry["date"]}' + ('\n' + converted if converted else ''))
         if entry['reimbursed_minor']:
             lines.append(payment_totals(entry, conf))
-        rows.append([button(f'查看 #{entry["id"]} · {entry["description"][:24]}', f'e:{entry["id"]}')])
+        rows.append([button(f'查看 #{entry["id"]} · {entry_description(entry)[:24]}', f'e:{entry["id"]}')])
     if not ids:
         lines.append('\n这里还没有账目。')
     paging = []
@@ -227,7 +232,7 @@ def list_entries(conn, user, chat_id, scope='recent', page=0, rates=None):
 
 def detail(conn, chat_id, entry_id, rates=None):
     conf, entry = settings(conn), entry_view(conn, entry_id)
-    lines = [f'🧾 #{entry_id} · {entry_status(entry)}', entry['description'], original(entry, conf)]
+    lines = [f'🧾 #{entry_id} · {entry_status(entry)}', entry_description(entry), original(entry, conf)]
     converted = reference(entry['amount'], entry['currency'], conf, rates)
     if converted:
         lines.append(converted)
@@ -318,7 +323,7 @@ def show_field(conn, chat_id, draft, field):
         say(conn, chat_id, '选择日期：', [[button('今天', f'd:{token}:day:0'), button('昨天', f'd:{token}:day:1')],
             [button('自定义日期', f'd:{token}:dateinput'), button('返回预览', f'd:{token}:back')]], edit=True)
     elif field in ('amount', 'description', 'note'):
-        hints = {'amount': f'请输入金额（{data["currency"]}）。', 'description': '请输入用途 / 收入说明。', 'note': '请输入备注，发送 - 清空。'}
+        hints = {'amount': f'请输入金额（{data["currency"]}）。', 'description': '用途 / 收入说明选填，发送 - 跳过 / 清空。', 'note': '请输入备注，发送 - 清空。'}
         ask(conn, chat_id, draft, 'edit_' + field, hints[field])
     else:
         fail('不支持修改该字段')
@@ -364,7 +369,7 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
             show_field(conn, chat_id, draft, step[5:])
         else:
             hints = {'amount': '请输入金额。', 'edit_amount': '请输入金额。',
-                     'description': '请输入用途 / 收入说明。', 'edit_description': '请输入用途 / 收入说明。',
+                     'description': '用途 / 收入说明选填，发送 - 跳过 / 清空。', 'edit_description': '用途 / 收入说明选填，发送 - 跳过 / 清空。',
                      'edit_note': '请输入备注，发送 - 清空。', 'pay_note': '请输入付款方式 / 付款参考号。',
                      'pay_amount': f'请输入本次实际已报销金额（{payload.get("_quote",{}).get("currency","")}），发送 全额 报销剩余全部。',
                      'void_note': '请输入作废原因。', 'distribute_note': '请输入分红说明。', 'ai_text': '🤖 请描述收支，可以一次说一段话。'}
@@ -408,7 +413,7 @@ def draft_callback(conn, user, telegram_id, chat_id, callback_data, rates):
         else:
             entry = add_entry(conn, user, payload, 'telegram', f'tg:draft:{token}')
         conn.execute('DELETE FROM tg_drafts WHERE token=?', (token,))
-        say(conn, chat_id, f'✅ 已{"保存修改" if payload.get("_edit_id") else "入账"} #{entry["id"]}\n{entry["description"]}\n{original(entry,conf)}\n' +
+        say(conn, chat_id, f'✅ 已{"保存修改" if payload.get("_edit_id") else "入账"} #{entry["id"]}\n{entry_description(entry)}\n{original(entry,conf)}\n' +
             ('已加入待报销，付款后可直接标记已报销。' if entry['status'] == 'pending' else STATUS[entry['status']]),
             [[button('查看详情', f'e:{entry["id"]}'), button('我的待报销', 'summary')], nav()], edit=True)
     elif action == 'commit' and step == 'action_confirm':
@@ -435,7 +440,7 @@ def show_payment_currencies(conn, chat_id, token, payload):
     if conf['reference_currency'] != entry['currency']:
         rows.append([button('按结算货币 · ' + conf['reference_currency'], f'd:{token}:paycur:{conf["reference_currency"]}')])
     rows.append([button('取消', f'd:{token}:cancel')])
-    say(conn, chat_id, f'💳 #{entry["id"]} {entry["description"]}\n{payment_totals(entry,conf)}\n\n选择本次实际付款的币种，再填写已报销金额。', rows, edit=True)
+    say(conn, chat_id, f'💳 #{entry["id"]} {entry_description(entry)}\n{payment_totals(entry,conf)}\n\n选择本次实际付款的币种，再填写已报销金额。', rows, edit=True)
 
 
 def action_preview(conn, chat_id, token, payload):
@@ -457,7 +462,7 @@ def action_preview(conn, chat_id, token, payload):
         if quote['currency'] != entry['currency']:
             payment_text += f'汇率：1 {entry["currency"]} = {quote["rate"]} {quote["currency"]} · {quote["rate_date"]}\n'
         rows.append([button('修改币种 / 金额', f'd:{token}:paychange')])
-    say(conn, chat_id, f'⚠️ 确认{label}\n#{entry["id"]} {entry["description"]}\n原金额 {original(entry,conf)}\n' + payment_text +
+    say(conn, chat_id, f'⚠️ 确认{label}\n#{entry["id"]} {entry_description(entry)}\n原金额 {original(entry,conf)}\n' + payment_text +
         f'成员：{entry["payer_name"]}\n备注：{payload["note"]}\n\n' +
         description,
         rows + [[button('取消', f'd:{token}:cancel')]], edit=True)
@@ -558,7 +563,7 @@ def entry_action(conn, user, telegram_id, chat_id, data, rates):
         if entry['status'] != 'voided':
             fail('仅已作废账目可以永久删除')
         if action == 'delete':
-            say(conn, chat_id, f'⚠️ 永久删除 #{entry["id"]}「{entry["description"]}」\n'
+            say(conn, chat_id, f'⚠️ 永久删除 #{entry["id"]}「{entry_description(entry)}」\n'
                 '账目、操作记录和凭证都会删除，无法恢复。', [
                     [button('确认永久删除', f'deleteyes:{entry["id"]}'), button('取消', f'e:{entry["id"]}')]
                 ], edit=True)
@@ -566,7 +571,7 @@ def entry_action(conn, user, telegram_id, chat_id, data, rates):
         receipt = delete_entry(conn, user, entry['id'])
         if receipt:
             (config.DATA / 'receipts' / os.path.basename(receipt)).unlink(missing_ok=True)
-        say(conn, chat_id, f'🗑 已永久删除 #{entry["id"]}「{entry["description"]}」\n账目、操作记录和凭证均已删除。',
+        say(conn, chat_id, f'🗑 已永久删除 #{entry["id"]}「{entry_description(entry)}」\n账目、操作记录和凭证均已删除。',
             [[button('📋 最近账目', 'list:recent:0')], nav()], edit=True)
         return
     if action == 'edit':
@@ -597,11 +602,19 @@ def entry_action(conn, user, telegram_id, chat_id, data, rates):
         return
     new_draft(conn, user, telegram_id, chat_id, body, step=action + '_note')
     ask(conn, chat_id, draft_for(conn, telegram_id, chat_id), action + '_note',
-        f'处理 #{entry["id"]}「{entry["description"]}」\n' + ('请填写付款方式 / 付款参考号，请先完成真实转账。' if action == 'pay' else '请填写分红说明，下一步确认后从团队余额排除。' if action == 'distribute' else '请填写作废原因。'))
+        f'处理 #{entry["id"]}「{entry_description(entry)}」\n' + ('请填写付款方式 / 付款参考号，请先完成真实转账。' if action == 'pay' else '请填写分红说明，下一步确认后从团队余额排除。' if action == 'distribute' else '请填写作废原因。'))
 
 
 def text_input(conn, user, msg, telegram_id, chat_id, text, command, ai_result, ai_error, rates, ai_context=None):
     draft, conf = draft_for(conn, telegram_id, chat_id), settings(conn)
+    prior_history = None
+    if draft:
+        try:
+            prior_payload = json.loads(draft['payload'])
+            if prior_payload.get('_flow') == 'ai_plan':
+                prior_history = prior_payload.get('history')
+        except (ValueError, TypeError):
+            pass
     if draft and command != '/ai' and accepts_text(conn, msg, telegram_id, chat_id, draft):
         step, payload = draft['step'], json.loads(draft['payload'])
         if payload.get('_flow') == 'funds':
@@ -609,7 +622,14 @@ def text_input(conn, user, msg, telegram_id, chat_id, text, command, ai_result, 
             bot_funds.text_input(conn, chat_id, draft, text, rates)
             return
         if payload.get('_flow') == 'ai_plan':
-            say(conn, chat_id, '🤖 当前操作清单还在等你确认。\n点上方 ✅ 执行，或发送 /cancel 取消后重新描述。',
+            if ai_error or (isinstance(ai_result, dict) and isinstance(ai_result.get('actions'), list)):
+                conn.execute('DELETE FROM tg_drafts WHERE token=?', (draft['token'],))
+                if ai_error:
+                    say(conn, chat_id, '⚠️ ' + ai_error, [[button('改用按钮记账', 'new')], nav()])
+                else:
+                    ai_plan_handle_result(conn, user, telegram_id, chat_id, conf, ai_result, ai_context, rates, text, prior_history)
+                return
+            say(conn, chat_id, '🤖 当前操作清单还在等你确认。\n点上方 ✅ 执行；也可以直接补充或修改需求，我会重新整理清单；发送 /cancel 取消。',
                 [[button('取消本次清单', 'cancel')], nav()])
             return
         if step == 'ai_text':
@@ -634,7 +654,7 @@ def text_input(conn, user, msg, telegram_id, chat_id, text, command, ai_result, 
                 minor_amount(text, currency(conf, payload['currency'])['decimals'])
                 payload['amount'] = text
             elif step in ('description', 'edit_description'):
-                payload['description'] = text_value(text, '用途', 120)
+                payload['description'] = '' if text == '-' else text_value(text, '用途', 120, False)
             elif step == 'edit_note':
                 payload['note'] = '' if text == '-' else text_value(text, '备注', 1000, False)
             else:
@@ -642,13 +662,10 @@ def text_input(conn, user, msg, telegram_id, chat_id, text, command, ai_result, 
                     payload['date'] = date.fromisoformat(text).isoformat()
                 except ValueError:
                     fail('日期请使用 YYYY-MM-DD 格式。')
-            if step == 'amount':
-                persist(conn, draft['token'], payload, 'description')
-                ask(conn, chat_id, draft_for(conn, telegram_id, chat_id), 'description', '3/3 · 请输入用途 / 收入说明。')
-            else:
-                normalized_entry(conn, user, payload)
-                persist(conn, draft['token'], payload, 'confirm')
-                preview(conn, chat_id, draft['token'], payload, rates)
+            payload.setdefault('description', '')
+            normalized_entry(conn, user, payload)
+            persist(conn, draft['token'], payload, 'confirm')
+            preview(conn, chat_id, draft['token'], payload, rates)
             return
         else:
             say(conn, chat_id, '请点击当前草稿的按钮继续，或发送 /cancel。', [nav()])
@@ -657,9 +674,7 @@ def text_input(conn, user, msg, telegram_id, chat_id, text, command, ai_result, 
         say(conn, chat_id, '⚠️ ' + ai_error, [[button('改用按钮记账', 'new')], nav()])
     elif ai_result:
         if isinstance(ai_result, dict) and isinstance(ai_result.get('actions'), list):
-            plan = ai_plan.resolve(conn, user, conf, ai_result, ai_context or {'entries': []}, rates)
-            plan = ai_plan.store(conn, user, plan, 'telegram')
-            ai_plan_deliver(conn, user, telegram_id, chat_id, plan)
+            ai_plan_handle_result(conn, user, telegram_id, chat_id, conf, ai_result, ai_context, rates, text, prior_history)
         else:
             normalized_entry(conn, user, ai_result)
             token, payload = new_draft(conn, user, telegram_id, chat_id, ai_result)
@@ -678,7 +693,13 @@ def ai_query_line(card, conf):
     kind = card.get('kind') if isinstance(card, dict) else None
     if kind == 'entries':
         totals = ' / '.join(amount_text(value, code, conf) for code, value in card.get('totals', {}).items())
-        return f'🔎 查到 {card.get("total", 0)} 笔' + (f' · {totals}' if totals else '')
+        lines = [f'🔎 查到 {card.get("total", 0)} 笔' + (f' · {totals}' if totals else '')]
+        for entry in card.get('entries', [])[:5]:
+            lines.append(f'#{entry["id"]} {entry_description(entry)[:40]} · '
+                         f'{amount_text(entry["amount"], entry["currency"], conf)} · {entry_status(entry)}')
+        if card.get('total', 0) > 5:
+            lines.append(f'…另有 {card["total"] - 5} 笔，可在 Web 收支明细查看。')
+        return '\n'.join(lines)
     if kind == 'summary':
         parts = []
         for code, values in card.get('totals', {}).items():
@@ -694,17 +715,27 @@ def ai_query_line(card, conf):
     if kind in ('balance', 'due', 'funds'):
         if not card.get('complete'):
             return '📊 ' + (card.get('warning') or '资金数据暂不可用')
-        return (f'💰 可用 {amount_text(card["cash"], card["base"], conf)}'
-                f' · 待报销 {amount_text(card["due"], card["base"], conf)}'
-                f' · 可安排 {amount_text(card["payable"], card["base"], conf)}')
+        lines = [f'💰 可用 {amount_text(card["cash"], card["base"], conf)}'
+                 f' · 待报销 {amount_text(card["due"], card["base"], conf)}'
+                 f' · 可安排 {amount_text(card["payable"], card["base"], conf)}']
+        for member in (card.get('members') or [])[:5]:
+            if Decimal(str(member.get('due', '0'))) > 0:
+                lines.append(f'🙋 {member["name"]} · 待报销 {amount_text(member["due"], card["base"], conf)}'
+                             f' · 建议 {amount_text(member["suggested"], card["base"], conf)}')
+        if card.get('warning'):
+            lines.append('💡 ' + card['warning'])
+        return '\n'.join(lines)
     if kind == 'simulation':
         if not card.get('complete'):
             return '⚗️ ' + (card.get('warning') or '模拟暂不可用')
-        return (f'⚗️ 模拟进账后可用 {amount_text(card["cash"], card["base"], conf)}'
+        text = (f'⚗️ 模拟进账后可用 {amount_text(card["cash"], card["base"], conf)}'
                 f' · 可安排 {amount_text(card["payable"], card["base"], conf)}')
+        if card.get('warning'):
+            text += '\n💡 ' + card['warning']
+        return text
     if kind == 'entry':
         entry = card['entry']
-        return (f'🧾 #{entry["id"]} {entry["description"]} · '
+        return (f'🧾 #{entry["id"]} {entry_description(entry)} · '
                 f'{amount_text(entry["amount"], entry["currency"], conf)} · {entry_status(entry)}')
     if kind == 'error':
         return '⚠️ ' + str(card.get('error') or '查询失败')
@@ -716,20 +747,34 @@ def ai_plan_persist(conn, token, payload):
     conn.execute('UPDATE tg_drafts SET payload=? WHERE token=?', (json.dumps(payload, ensure_ascii=False), token))
 
 
-def ai_plan_deliver(conn, user, telegram_id, chat_id, plan):
+def ai_plan_deliver(conn, user, telegram_id, chat_id, plan, request_text='', history=None):
     conf = settings(conn)
     valid = [card for card in plan['actions'] if not card['errors']]
     if plan.get('plan_id') and valid:
         conn.execute('DELETE FROM tg_drafts WHERE telegram_id=? AND chat_id=?', (telegram_id, chat_id))
         token = secrets.token_hex(5)
-        payload = {'_flow': 'ai_plan', 'plan': plan, 'selected': [card['index'] for card in valid], 'page': 0}
+        summary = (plan.get('reply') or '') + '\n' + '\n'.join(
+            f'{position + 1}. {card["summary"]}' for position, card in enumerate(plan['actions']))
+        turns = list(history or []) + [
+            {'role': 'user', 'text': str(request_text)[:900]},
+            {'role': 'assistant', 'text': summary[:900]},
+        ]
+        payload = {'_flow': 'ai_plan', 'plan': plan, 'selected': [card['index'] for card in valid],
+                   'page': 0, 'history': turns[-8:]}
         expires = min(int(plan.get('expires') or (time.time() + 1800)), int(time.time()) + 3600)
         conn.execute('INSERT INTO tg_drafts VALUES (?,?,?,?,?,?,?)',
                      (token, telegram_id, chat_id, user['id'], 'ai_plan',
                       json.dumps(payload, ensure_ascii=False), expires))
         ai_plan_show(conn, chat_id, token, payload)
         return
-    lines = ['🤖 这次没有可以执行的操作。']
+    if plan.get('results'):
+        lines = ['🤖 查询结果']
+    elif plan.get('questions') and not plan.get('actions'):
+        lines = ['🤖 还需要确认']
+    elif plan.get('reply') and not plan.get('actions'):
+        lines = ['🤖 回答']
+    else:
+        lines = ['🤖 这次没有可以执行的操作。']
     if plan.get('reply'):
         lines.append(plan['reply'])
     for question in plan.get('questions', []):
@@ -743,6 +788,12 @@ def ai_plan_deliver(conn, user, telegram_id, chat_id, plan):
             lines.append(line)
     say(conn, chat_id, '\n'.join(lines)[:3900],
         [[button('🔄 重新描述', 'ai'), button('🏠 主菜单', 'home')]], edit=True)
+
+
+def ai_plan_handle_result(conn, user, telegram_id, chat_id, conf, result, context, rates, request_text='', history=None):
+    plan = ai_plan.resolve(conn, user, conf, result, context or {'entries': []}, rates)
+    plan = ai_plan.store(conn, user, plan, 'telegram')
+    ai_plan_deliver(conn, user, telegram_id, chat_id, plan, request_text, history)
 
 
 def ai_plan_show(conn, chat_id, token, payload, page=None):
@@ -774,6 +825,14 @@ def ai_plan_show(conn, chat_id, token, payload, page=None):
             mark = '☑️' if card['index'] in selected else '⬜'
         icon = AI_ICONS.get(card['type'], '•')
         lines.append(f'{position + 1}. {mark} {icon} {card["summary"][:170]}')
+        if card['type'] == 'batch_pay':
+            items = card.get('resolved', {}).get('items') or []
+            for item in items[:5]:
+                lines.append(f'   · #{item["id"]} {entry_description(item)[:28]} · '
+                             f'{amount_text(item["amount"], item["currency"], conf)} → 抵扣 '
+                             f'{amount_text(item["credited"], item["entry_currency"], conf)}')
+            if len(items) > 5:
+                lines.append(f'   · 另有 {len(items) - 5} 笔，确认后一次登记。')
         if card['errors']:
             lines.append('   ⚠️ ' + '；'.join(card['errors'])[:180])
         elif card['type'] in ('pay_entry', 'batch_pay', 'delete_entry') and card.get('warnings'):
@@ -810,25 +869,26 @@ def ai_plan_receipt(conn, chat_id, executed, conf):
             lines.append(f'🔥 已永久删除 #{result["entry_id"]}')
             continue
         if kind == 'batch_pay':
-            lines.append(f'📦 已登记 {result.get("count", 0)} 笔报销')
+            totals = ' / '.join(amount_text(value, code, conf) for code, value in (result.get('totals') or {}).items())
+            lines.append(f'📦 已登记 {result.get("count", 0)} 笔报销' + (f' · {totals}' if totals else ''))
             continue
         try:
             entry = entry_view(conn, result['entry_id'])
         except HTTPException:
             entry = None
         if kind in ('create_entry', 'edit_entry'):
-            lines.append(f'{AI_ICONS[kind]} #{result["entry_id"]} {result.get("description", "")} · '
+            lines.append(f'{AI_ICONS[kind]} #{result["entry_id"]} {entry_description(result)} · '
                          f'{amount_text(result.get("amount"), result.get("currency"), conf)}')
         elif kind == 'pay_entry' and entry:
-            lines.append(f'💳 #{entry["id"]} {entry["description"]} · 累计已报 '
+            lines.append(f'💳 #{entry["id"]} {entry_description(entry)} · 累计已报 '
                          f'{amount_text(entry["reimbursed_amount"], entry["currency"], conf)} · 剩余 '
                          f'{amount_text(entry["remaining_amount"], entry["currency"], conf)}')
         elif kind == 'void_entry' and entry:
-            lines.append(f'🗑️ #{entry["id"]} {entry["description"]} · 已作废')
+            lines.append(f'🗑️ #{entry["id"]} {entry_description(entry)} · 已作废')
         elif kind == 'submit_entry' and entry:
-            lines.append(f'📥 #{entry["id"]} {entry["description"]} · 已记入账本')
+            lines.append(f'📥 #{entry["id"]} {entry_description(entry)} · 已记入账本')
         elif kind == 'distribute_income' and entry:
-            lines.append(f'🎁 #{entry["id"]} {entry["description"]} · 已标记分红')
+            lines.append(f'🎁 #{entry["id"]} {entry_description(entry)} · 已标记分红')
     for result in executed.get('queries', []):
         line = ai_query_line(result.get('card', {}), conf)
         if line:

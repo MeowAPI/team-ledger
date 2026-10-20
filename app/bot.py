@@ -27,11 +27,12 @@ def process_update(update):
         conf = settings(conn)
         command, argument = command_text(text, conf)
         authorized_chat = msg.get('chat', {}).get('type') == 'private' or chat_id in conf['telegram_allowed_chats']
-        linked = conn.execute('SELECT u.id FROM tg_links t JOIN users u ON u.id=t.user_id WHERE t.telegram_id=? AND u.active=1', (telegram_id,)).fetchone()
+        linked = conn.execute('SELECT u.* FROM tg_links t JOIN users u ON u.id=t.user_id WHERE t.telegram_id=? AND u.active=1', (telegram_id,)).fetchone()
         draft = draft_for(conn, telegram_id, chat_id)
         accepted = accepts_text(conn, msg, telegram_id, chat_id, draft)
         callback_data = callback.get('data', '') if callback else ''
         payload = json.loads(draft['payload']) if draft else {}
+        followup_history = payload.get('history') if draft and draft['step'] == 'ai_plan' and payload.get('_flow') == 'ai_plan' else None
         funds_flow = command == '/funds' or callback_data == 'funds' or callback_data.startswith('f:') or (payload.get('_flow') == 'funds' and ((not callback and not command and accepted) or callback_data == f'd:{draft["token"]}:resume'))
         codes = {r['currency'] for r in conn.execute('SELECT DISTINCT currency FROM entries')}
         payment_code = None
@@ -43,20 +44,29 @@ def process_update(update):
                 payment_code = row['currency'] if row else None
     result, error, rates = None, None, None
     authorized = bool(linked and authorized_chat and command != 'foreign' and not sender.get('is_bot'))
-    wants_ai = not callback and (command == '/ai' and bool(argument) or not command and text and accepted and (not draft or draft['step'] == 'ai_text'))
+    wants_ai = not callback and (
+        (command == '/ai' and bool(argument))
+        or (not command and text and accepted and (
+            not draft or draft['step'] == 'ai_text'
+            or (draft['step'] == 'ai_plan' and payload.get('_flow') == 'ai_plan')
+        ))
+    )
     # External calls happen before taking the SQLite write lock.
     progress_stop = progress_message = ledger_context = None
     if authorized and wants_ai:
-        try:
-            with db() as conn:
-                ledger_context = ai_context.build(conn, conf, dict(linked))
-        except Exception:
-            ledger_context = None
+        # Immediate feedback first: context assembly may also touch the FX cache.
         progress_stop, progress_message = progress_start(chat_id, msg.get('message_thread_id'))
         try:
-            result = ai.parse(argument if command == '/ai' else text, conf, context=ledger_context)
-        except HTTPException as exc:
-            error = exc.detail
+            try:
+                with db() as conn:
+                    ledger_context = ai_context.build(conn, conf, dict(linked))
+            except Exception:
+                ledger_context = None
+            try:
+                result = ai.parse(argument if command == '/ai' else text, conf,
+                                  context=ledger_context, history=followup_history)
+            except HTTPException as exc:
+                error = exc.detail
         finally:
             if progress_stop:
                 progress_stop.set()
@@ -85,7 +95,7 @@ def process_update(update):
             callback_data.startswith(f'f:{draft["token"]}:') and fund_action in ('plan', 'receipt', 'note', 'commit')
             or callback_data == f'd:{draft["token"]}:resume' and draft['step'] in ('funds_confirm', 'funds_note', 'funds_receipt')
             or not callback and not command and draft['step'] == 'funds_note')
-        if not frozen_funds and (funds_flow or wants_rates or command in ('/summary', '/team', '/recent', '/funds') or result or (draft and draft['step'].startswith(('edit_', 'description')))):
+        if not frozen_funds and (funds_flow or wants_rates or command in ('/summary', '/team', '/recent', '/funds') or result or (draft and draft['step'].startswith(('edit_', 'description', 'amount')))):
             try:
                 rates = fx.rates_for(conf['reference_currency'], codes)
             except Exception:

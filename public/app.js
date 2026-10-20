@@ -28,6 +28,7 @@ const icon = name => `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="
 const PAGES = {overview:['团队总览','overview','grid'],ledger:['收支明细','ledger','book'],reimbursements:['报销管理','reimbursements','wallet'],calculator:['资金计算','calculator','calc'],members:['团队成员','members','users'],integrations:['机器人与 AI','integrations','send'],settings:['团队设置','settings','settings']};
 const STATUS = {draft:'草稿',pending:'待报销',partial:'部分报销',reimbursed:'已报销',posted:'团队在账',distributed:'已分红',voided:'已作废'};
 const entryStatus = e => e.status==='pending'&&e.reimbursed_minor>0?'partial':e.status;
+const entryDescription = e => e.description || '未填写说明';
 const ROLES = {owner:'团队成员 · 共同管理',finance:'团队成员 · 共同管理',member:'团队成员 · 共同管理'};
 const COLORS = ['green','orange','blue','purple'];
 const state = {user:null,csrf:'',conf:null,members:[],entries:[],integrations:{},report:null,page:'overview',
@@ -108,7 +109,7 @@ function settlementDisplay(entry, report=state.report) {
 }
 function table(entries,{checkbox=false}={}) {
   if (!entries.length) return empty('还没有符合条件的账目','调整筛选条件，或记下新的一笔。',newButton());
-  return `<div class="table-wrap"><table class="data-table"><thead><tr>${checkbox?'<th class="check-cell"><input type="checkbox" id="select-all" aria-label="选择本页全部账目"></th>':''}<th>用途 / 说明</th><th>成员</th><th>日期</th><th class="money">金额</th><th>状态</th><th>来源</th><th></th></tr></thead><tbody>${entries.map(e=>`<tr data-entry="${e.id}" tabindex="0" aria-label="查看 ${esc(e.description)}">${checkbox?`<td class="check-cell"><input type="checkbox" data-select="${e.id}" ${state.selected.has(e.id)?'checked':''} aria-label="选择 ${esc(e.description)}"></td>`:''}<td><div class="entry-cell">${entryIcon(e)}<div><strong>${esc(e.description)}</strong><span class="subline">${e.kind==='income'?'团队收入':'成员垫付'}${e.receipt?' · 已附凭证':''}</span></div></div></td><td>${esc(e.payer_name)}</td><td>${esc(e.date.slice(5).replace('-',' / '))}<span class="subline">${esc(e.date.slice(0,4))}</span></td><td class="money ${e.kind==='income'?'income':''}"><strong>${e.kind==='income'?'+':'−'} ${money(e.amount,e.currency,false)}</strong><span class="subline">${esc(e.currency)}</span>${settlementDisplay(e)}${paymentSummary(e)}</td><td>${badge(entryStatus(e))}</td><td><span class="row-source">${e.source==='telegram'?'↗ Telegram':'▣ Web'}</span></td><td>↗</td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="table-wrap"><table class="data-table"><thead><tr>${checkbox?'<th class="check-cell"><input type="checkbox" id="select-all" aria-label="选择本页全部账目"></th>':''}<th>用途 / 说明</th><th>成员</th><th>日期</th><th class="money">金额</th><th>状态</th><th>来源</th><th></th></tr></thead><tbody>${entries.map(e=>`<tr data-entry="${e.id}" tabindex="0" aria-label="查看 ${esc(entryDescription(e))}">${checkbox?`<td class="check-cell"><input type="checkbox" data-select="${e.id}" ${state.selected.has(e.id)?'checked':''} aria-label="选择 ${esc(entryDescription(e))}"></td>`:''}<td><div class="entry-cell">${entryIcon(e)}<div><strong>${esc(entryDescription(e))}</strong><span class="subline">${e.kind==='income'?'团队收入':'成员垫付'}${e.receipt?' · 已附凭证':''}</span></div></div></td><td>${esc(e.payer_name)}</td><td>${esc(e.date.slice(5).replace('-',' / '))}<span class="subline">${esc(e.date.slice(0,4))}</span></td><td class="money ${e.kind==='income'?'income':''}"><strong>${e.kind==='income'?'+':'−'} ${money(e.amount,e.currency,false)}</strong><span class="subline">${esc(e.currency)}</span>${settlementDisplay(e)}${paymentSummary(e)}</td><td>${badge(entryStatus(e))}</td><td><span class="row-source">${e.source==='telegram'?'↗ Telegram':e.source==='ai'?'✧ AI':'▣ Web'}</span></td><td>↗</td></tr>`).join('')}</tbody></table></div>`;
 }
 function reportWarning(report=state.report) {
   if (!report) return `<div class="callout warning">${icon('info')}<span>资金计算暂不可用，请刷新重试。原币种收支仍可查看。</span></div>`;
@@ -121,6 +122,8 @@ function aiComposer() {
 
 const AI_LABELS={create_entry:'新增账目',edit_entry:'修改账目',void_entry:'作废账目',submit_entry:'草稿入账',distribute_income:'收入分红',pay_entry:'登记报销',batch_pay:'批量报销',delete_entry:'永久删除'};
 const AI_ICONS={create_entry:'📝',edit_entry:'✏️',void_entry:'🗑️',submit_entry:'📥',distribute_income:'🎁',pay_entry:'💳',batch_pay:'📦',delete_entry:'🔥'};
+const AI_STATUS={draft:'草稿',pending:'待报销',posted:'团队在账',distributed:'已分红',reimbursed:'已报销',voided:'已作废'};
+const AI_EVENT_NAMES={created:'创建',edited:'修改',submit:'记入账本',approve:'历史：通过',reject:'历史：退回',pay:'登记付款',void:'作废',distribute:'标记分红',receipt:'上传凭证'};
 const aiSelected=()=>state.ai.plan?state.ai.plan.actions.filter(a=>!a.errors?.length&&state.ai.selected.has(a.index)).length:0;
 function aiMessage(role,text){state.ai.conversation.push({role,text:String(text)});if(state.ai.conversation.length>24)state.ai.conversation=state.ai.conversation.slice(-24);}
 function aiHistory(){
@@ -129,33 +132,37 @@ function aiHistory(){
     const summary=state.ai.plan.actions.map((a,i)=>`${i+1}. ${a.summary}`).join('\n');
     if(summary)turns.push({role:'assistant',text:'当前操作清单：\n'+summary.slice(0,900)});
   }
+  if(state.ai.plan?.results?.length){
+    const summary=state.ai.plan.results.map(r=>aiQueryText(r.card)).filter(Boolean).join('\n');
+    if(summary)turns.push({role:'assistant',text:'上一轮查询结果：\n'+summary.slice(0,900)});
+  }
   return turns;
 }
 function aiFieldRows(action){
   const r=action.resolved||{},rows=[];
   const add=(label,value)=>{if(value!==undefined&&value!==null&&value!=='')rows.push(`<span><b>${esc(label)}</b> ${esc(value)}</span>`);};
   if(action.type==='create_entry'){
-    add('类型',r.kind==='income'?'团队收入':'成员垫付');add('金额',`${r.amount} ${r.currency}`);add('用途',r.description);
-    add('日期',r.date);add('成员',r.payer_name||r.payer_id);add('状态',r.status);add('备注',r.note);
+    add('类型',r.kind==='income'?'团队收入':'成员垫付');add('金额',`${r.amount} ${r.currency}`);add('用途',entryDescription(r));
+    add('日期',r.date);add('成员',r.payer_name||r.payer_id);add('状态',AI_STATUS[r.status]||r.status);add('备注',r.note);
   }else if(action.type==='edit_entry'){
-    add('编号',`#${r.id}`);add('金额',`${r.amount} ${r.currency}`);add('用途',r.description);add('日期',r.date);add('备注',r.note);
+    add('编号',`#${r.id}`);add('金额',`${r.amount} ${r.currency}`);add('用途',entryDescription(r));add('日期',r.date);add('备注',r.note);
   }else if(['void_entry','submit_entry','distribute_income'].includes(action.type)){
     add('编号',`#${r.id}`);add('备注',r.note);
   }else if(action.type==='pay_entry'){
     add('编号',`#${r.id}`);add('本次付款',`${r.amount} ${r.currency}`);add('抵扣',`${r.entry_amount} ${r.entry_currency}`);
     add('登记后剩余',`${r.remaining_amount} ${r.entry_currency}`);add('付款备注',r.note);
   }else if(action.type==='batch_pay'){
-    add('付款币种',r.mode==='settlement'?'团队结算货币':'各笔记账货币');add('限定成员',r.payer_id?`#${r.payer_id}`:'');
+    add('付款币种',r.mode==='settlement'?'团队结算货币':'各笔记账货币');add('限定成员',r.payer_name||(r.payer_id?`#${r.payer_id}`:''));
     add('日期范围',[r.date_from,r.date_to].filter(Boolean).join(' 至 '));add('付款备注',r.note);
   }else if(action.type==='delete_entry'){
-    add('编号',`#${r.id}`);add('说明',r.description);
+    add('编号',`#${r.id}`);add('说明',entryDescription(r));
   }
   return rows.length?`<div class="ai-fields">${rows.join('')}</div>`:'';
 }
 function aiActionCard(action,position){
   const errors=action.errors||[],warnings=action.warnings||[],checked=state.ai.selected.has(action.index),disabled=Boolean(errors.length);
-  const batch=action.type==='batch_pay'&&action.resolved?.items?.length?`<div class="ai-batch-items">${action.resolved.items.slice(0,12).map(item=>`<div>#${esc(item.id)} ${esc(item.description)} · 实际付款 ${esc(item.amount)} ${esc(item.currency)} · 抵扣 ${esc(item.credited)} ${esc(item.entry_currency)}</div>`).join('')}${action.resolved.items.length>12?`<div>另有 ${action.resolved.items.length-12} 笔，确认后一次登记。</div>`:''}</div>`:'';
-  return `<article class="ai-action-card ${disabled?'has-error':''}"><label class="ai-action-check"><input type="checkbox" data-ai-select="${action.index}" ${checked?'checked':''} ${disabled?'disabled':''} aria-label="选择第 ${position} 项操作"></label><div class="ai-action-body"><div class="ai-action-head"><span class="ai-action-icon">${AI_ICONS[action.type]||'•'}</span><strong>${esc(action.label||AI_LABELS[action.type]||action.type)}</strong><span class="ai-action-type">${esc(AI_LABELS[action.type]||action.type)}</span></div><p class="ai-action-summary">${esc(action.summary)}</p>${errors.length?`<div class="ai-action-error">⚠️ ${errors.map(esc).join('<br>⚠️ ')}</div>`:''}${warnings.length?`<div class="ai-action-warning">💡 ${warnings.map(esc).join('<br>💡 ')}</div>`:''}${aiFieldRows(action)}${batch}${action.type==='create_entry'&&!disabled?`<button class="btn small" data-ai-edit-form="${action.index}">在表单中修改（可传凭证）</button>`:''}</div></article>`;
+  const batch=action.type==='batch_pay'&&action.resolved?.items?.length?`<div class="ai-batch-items">${action.resolved.items.slice(0,12).map(item=>`<div>#${esc(item.id)} ${esc(entryDescription(item))} · 实际付款 ${esc(item.amount)} ${esc(item.currency)} · 抵扣 ${esc(item.credited)} ${esc(item.entry_currency)}</div>`).join('')}${action.resolved.items.length>12?`<div>另有 ${action.resolved.items.length-12} 笔，确认后一次登记。</div>`:''}</div>`:'';
+  return `<article class="ai-action-card ${disabled?'has-error':''}"><label class="ai-action-check"><input type="checkbox" data-ai-select="${action.index}" ${checked?'checked':''} ${disabled?'disabled':''} aria-label="选择第 ${position} 项操作"></label><div class="ai-action-body"><div class="ai-action-head"><span class="ai-action-icon">${AI_ICONS[action.type]||'•'}</span><strong>${esc(action.label||AI_LABELS[action.type]||action.type)}</strong></div><p class="ai-action-summary">${esc(action.summary)}</p>${errors.length?`<div class="ai-action-error">⚠️ ${errors.map(esc).join('<br>⚠️ ')}</div>`:''}${warnings.length?`<div class="ai-action-warning">💡 ${warnings.map(esc).join('<br>💡 ')}</div>`:''}${aiFieldRows(action)}${batch}${action.type==='create_entry'&&!disabled?`<button class="btn small" data-ai-edit-form="${action.index}">在表单中修改（可传凭证）</button>`:''}</div></article>`;
 }
 function aiQueryText(card){
   if(!card)return'';
@@ -163,7 +170,7 @@ function aiQueryText(card){
   if(card.kind==='summary')return `📊 共 ${card.count} 笔`;
   if(card.kind==='balance'||card.kind==='due'||card.kind==='funds')return card.complete?`💰 可用 ${card.cash} ${card.base} · 待报销 ${card.due} ${card.base}`:(card.warning||'资金数据暂不可用');
   if(card.kind==='simulation')return card.complete?`⚗️ 模拟进账后可用 ${card.cash} ${card.base}`:(card.warning||'模拟暂不可用');
-  if(card.kind==='entry')return `🧾 #${card.entry.id} ${card.entry.description}`;
+  if(card.kind==='entry')return `🧾 #${card.entry.id} ${entryDescription(card.entry)}`;
   if(card.kind==='error')return `⚠️ ${card.error}`;
   return '';
 }
@@ -180,16 +187,18 @@ function aiQueryCard(card){
   if(['balance','due','funds'].includes(card.kind)){
     if(!card.complete)return `<div class="ai-query-card warn">📊 ${esc(card.warning||'资金数据暂不可用')}</div>`;
     const base=card.base;
-    return `<div class="ai-query-card"><div class="ai-query-head">💰 资金概览 <span>${esc(base)}</span></div><div class="ai-metrics"><span>可用 ${money(card.cash,base)}</span><span>在账收入 ${money(card.income,base)}</span><span>已报销 ${money(card.paid,base)}</span><span>待报销 ${money(card.due,base)}</span><span>可安排 ${money(card.payable,base)}</span><span>缺口 ${money(card.shortage,base)}</span></div>${card.members?.length?`<div class="ai-batch-items">${card.members.filter(m=>Number(m.due)>0).slice(0,8).map(m=>`<div>🙋 ${esc(m.name)} · 待报销 ${money(m.due,base)} · 建议 ${money(m.suggested,base)}</div>`).join('')}</div>`:''}</div>`;
+    return `<div class="ai-query-card"><div class="ai-query-head">💰 资金概览 <span>${esc(base)}</span></div><div class="ai-metrics"><span>可用 ${money(card.cash,base)}</span><span>在账收入 ${money(card.income,base)}</span><span>已报销 ${money(card.paid,base)}</span><span>待报销 ${money(card.due,base)}</span><span>可安排 ${money(card.payable,base)}</span><span>缺口 ${money(card.shortage,base)}</span></div>${card.members?.length?`<div class="ai-batch-items">${card.members.filter(m=>Number(m.due)>0).slice(0,8).map(m=>`<div>🙋 ${esc(m.name)} · 待报销 ${money(m.due,base)} · 建议 ${money(m.suggested,base)}</div>`).join('')}</div>`:''}${card.warning?`<div class="ai-action-warning">💡 ${esc(card.warning)}</div>`:''}</div>`;
   }
   if(card.kind==='simulation'){
     if(!card.complete)return `<div class="ai-query-card warn">⚗️ ${esc(card.warning||'模拟暂不可用')}</div>`;
     const base=card.base;
-    return `<div class="ai-query-card"><div class="ai-query-head">⚗️ 模拟进账 <span>仅试算，未入账</span></div><div class="ai-metrics"><span>模拟后可用 ${money(card.cash,base)}</span><span>待报销 ${money(card.due,base)}</span><span>可安排 ${money(card.payable,base)}</span><span>缺口 ${money(card.shortage,base)}</span></div></div>`;
+    return `<div class="ai-query-card"><div class="ai-query-head">⚗️ 模拟进账 <span>仅试算，未入账</span></div><div class="ai-metrics"><span>模拟后可用 ${money(card.cash,base)}</span><span>待报销 ${money(card.due,base)}</span><span>可安排 ${money(card.payable,base)}</span><span>缺口 ${money(card.shortage,base)}</span></div>${card.warning?`<div class="ai-action-warning">💡 ${esc(card.warning)}</div>`:''}</div>`;
   }
   if(card.kind==='entry'){
     const e=card.entry;
-    return `<div class="ai-query-card"><div class="ai-query-head">🧾 账目 #${esc(e.id)} <span>${badge(entryStatus(e))}</span></div><div class="ai-metrics"><span>${esc(e.description)}</span><span>${money(e.amount,e.currency)}</span><span>${esc(e.payer_name)}</span><span>${esc(e.date)}</span>${e.kind==='expense'&&e.reimbursed_minor>0?`<span>剩余 ${money(e.remaining_amount,e.currency)}</span>`:''}</div></div>`;
+    const payments=(e.payments||[]).map(p=>`<div>💳 ${esc(p.created_at.slice(0,10))} · ${money(p.amount,p.currency)} · 抵扣 ${money(p.entry_amount,e.currency)}</div>`).join('');
+    const events=(card.events||[]).slice(-5).map(ev=>`<div>${esc(ev.created_at.replace('T',' ').slice(0,16))} · ${esc(ev.name)} · ${esc(AI_EVENT_NAMES[ev.action]||ev.action)}${ev.detail?' · '+esc(ev.detail):''}</div>`).join('');
+    return `<div class="ai-query-card"><div class="ai-query-head">🧾 账目 #${esc(e.id)} <span>${badge(entryStatus(e))}</span></div><div class="ai-metrics"><span>${esc(entryDescription(e))}</span><span>${money(e.amount,e.currency)}</span><span>${esc(e.payer_name)}</span><span>${esc(e.date)}</span>${e.kind==='expense'&&e.reimbursed_minor>0?`<span>剩余 ${money(e.remaining_amount,e.currency)}</span>`:''}</div>${payments?`<div class="ai-batch-items">${payments}</div>`:''}${events?`<div class="ai-batch-items">${events}</div>`:''}</div>`;
   }
   if(card.kind==='error')return `<div class="ai-query-card error">⚠️ ${esc(card.error)}</div>`;
   return'';
@@ -199,7 +208,9 @@ function renderAiPlan(){
   const actions=plan.actions||[],results=plan.results||[],valid=actions.filter(a=>!a.errors?.length),count=aiSelected();
   let html='<section class="ai-plan">';
   if(results.length)html+=`<div class="ai-results">${results.map(r=>aiQueryCard(r.card)).join('')}</div>`;
+  if(results.length&&actions.length)html+='<p class="ai-plan-note">查询结果为当前账本状态；确认写操作后会自动更新。</p>';
   if(actions.length){
+    if(plan.questions?.length)html+='<p class="ai-plan-note">还有需要确认的信息：可先执行已识别的项，或补充说明后重新整理。</p>';
     html+=`<div class="ai-plan-head"><strong>📋 操作清单</strong><span id="ai-plan-count">${actions.length} 项 · 已选 ${count} 项</span></div>`;
     html+=actions.map((action,position)=>aiActionCard(action,position+1)).join('');
   }
@@ -213,7 +224,10 @@ function renderAi(){
   const bubbles=state.ai.conversation.map(m=>`<div class="ai-bubble ${m.role==='user'?'user':'assistant'}">${esc(m.text).replace(/\n/g,'<br>')}</div>`).join('');
   const typing=state.ai.busy?`<div class="ai-bubble assistant typing" aria-label="AI 正在思考"><span></span><span></span><span></span></div>`:'';
   transcript.innerHTML=bubbles+typing+renderAiPlan();
-  transcript.scrollTop=transcript.scrollHeight;
+  if(!state.ai.busy&&state.ai.plan){
+    const anchor=transcript.querySelector('.ai-bubble.assistant:last-of-type');
+    transcript.scrollTop=anchor?Math.max(0,anchor.offsetTop-14):transcript.scrollHeight;
+  }else transcript.scrollTop=transcript.scrollHeight;
   const form=$('#ai-form');
   if(form){form.elements.text.disabled=state.ai.busy;const button=$('button[type=submit]',form);if(button)button.disabled=state.ai.busy;}
 }
@@ -226,7 +240,8 @@ async function submitAi(form){
   try{
     const data=await api('/ai/plan','POST',{text,history});
     const summary=[data.reply||'',...(data.questions||[]).map(q=>'❓ '+q)].filter(Boolean).join('\n');
-    aiMessage('assistant',summary||'已为你整理好操作，请核对下面的清单。');
+    const fallback=(data.actions?.length||data.results?.length)?'已为你整理好操作，请核对下面的清单。':'我没有理解出可执行的操作，请换一种说法补充。';
+    aiMessage('assistant',summary||fallback);
     state.ai.plan=data;state.ai.selected=new Set((data.actions||[]).filter(a=>!a.errors?.length).map(a=>a.index));
     renderAi();
   }catch(e){$('#ai-error').textContent=e.message;aiMessage('assistant','⚠️ '+e.message);renderAi();}
@@ -240,9 +255,9 @@ async function executeAiPlan(){
     const data=await api('/ai/execute','POST',{plan_id:plan.plan_id,actions},{'Idempotency-Key':crypto.randomUUID()});
     const lines=[`✅ 已完成 ${data.results.length} 项操作`];
     for(const r of data.results){
-      if(r.type==='create_entry'||r.type==='edit_entry')lines.push(`📝 #${r.entry_id} ${r.description} · ${r.amount} ${r.currency}`);
+      if(r.type==='create_entry'||r.type==='edit_entry')lines.push(`📝 #${r.entry_id} ${entryDescription(r)} · ${r.amount} ${r.currency}`);
       else if(r.type==='pay_entry')lines.push(`💳 #${r.entry_id} 已登记付款`);
-      else if(r.type==='batch_pay')lines.push(`📦 已登记 ${r.count} 笔报销`);
+      else if(r.type==='batch_pay'){const totals=Object.entries(r.totals||{}).map(([code,amount])=>`${amount} ${code}`).join(' / ');lines.push(`📦 已登记 ${r.count} 笔报销${totals?` · ${totals}`:''}`);}
       else if(r.type==='delete_entry')lines.push(`🔥 #${r.entry_id} 已永久删除`);
       else lines.push(`✅ #${r.entry_id} 已更新`);
     }
@@ -356,7 +371,7 @@ function planTable(report) {
     const status=hasSuggestion?(full?'建议付款':'部分安排'):'暂不安排';
     const original=money(entry.amount,entry.currency,false);
     const converted=entry.currency===report.base?'':` · 结算参考 ${money(entry.settlement,report.base,false)}`;
-    return `<div class="plan-entry ${hasSuggestion?'is-selected':'is-waiting'}"><div class="plan-entry-main"><span class="plan-entry-status">${status}</span><strong>${esc(entry.description)}</strong><small>${esc(entry.date)} · 剩余待报 ${original}${converted}${Number(entry.reimbursed_amount)>0?` · 原金额 ${money(entry.original_amount,entry.currency,false)} · 已报 ${money(entry.reimbursed_amount,entry.currency,false)}`:``}</small></div><div class="plan-entry-suggested">${hasSuggestion?`建议 ${money(entry.suggested,report.base,false)}`:'—'}</div></div>`;
+    return `<div class="plan-entry ${hasSuggestion?'is-selected':'is-waiting'}"><div class="plan-entry-main"><span class="plan-entry-status">${status}</span><strong>${esc(entryDescription(entry))}</strong><small>${esc(entry.date)} · 剩余待报 ${original}${converted}${Number(entry.reimbursed_amount)>0?` · 原金额 ${money(entry.original_amount,entry.currency,false)} · 已报 ${money(entry.reimbursed_amount,entry.currency,false)}`:``}</small></div><div class="plan-entry-suggested">${hasSuggestion?`建议 ${money(entry.suggested,report.base,false)}`:'—'}</div></div>`;
   };
   return `<div class="table-wrap"><table class="data-table plan-table"><thead><tr><th>成员 / 具体项目</th><th class="money">全部待报销</th><th class="money">建议安排付款</th></tr></thead><tbody>${report.members.map(m=>`<tr><td><strong>${esc(m.name)}</strong><div class="plan-entry-list">${m.entries.map(entryLabel).join('')}</div></td><td class="money">${money(m.due,report.base,false)}</td><td class="money"><strong>${money(m.suggested,report.base,false)}</strong><small class="subline">按项目明细安排</small></td></tr>`).join('')}</tbody></table></div>`;
 }
@@ -372,7 +387,7 @@ function renderMembers() {
 function renderIntegrations() {
   const i=state.integrations;
   return heading('在哪里，都能好好记账。','Web 上管全局，Telegram 里随手记。','ONE LEDGER, TWO WAYS')+
-    `<div class="integration-grid"><section class="panel integration-card"><div class="integration-icon">${icon('send')}</div><div class="integration-title"><h2>Telegram 机器人</h2><span class="badge ${i.telegram_linked?'posted':'draft'}">${i.telegram_linked?'账号已绑定':'账号未绑定'}</span></div><p>按钮一步步记录，或发一句话让 AI 帮你填写。确认后，账目立即同步到 Web。</p><div class="integration-steps"><div class="integration-step"><span class="step-number">1</span><span>团队通过 BotFather 创建机器人，配置服务器的 TELEGRAM_BOT_TOKEN，并启动机器人进程。</span></div><div class="integration-step"><span class="step-number">2</span><span>点击下方生成 10 分钟内有效的一次性绑定码，在机器人私聊中发送 /start 绑定码。</span></div><div class="integration-step"><span class="step-number">3</span><span>发送 /book 按按钮记账；也可以说「今天订阅软件花了 20 美元」，确认预览后入账。</span></div></div><div class="notice">机器人配置：${i.bot_configured?'已配置':'尚未配置'} · 进程：${i.bot_online?'在线':'尚未检测到在线'}${i.bot_username?`<p>机器人：<a href="https://t.me/${esc(i.bot_username)}" target="_blank" rel="noreferrer">@${esc(i.bot_username)} ↗</a></p>`:''}</div><button class="btn primary" id="generate-link">${i.telegram_linked?'重新生成绑定码':'生成绑定码'}</button>${i.telegram_linked?' <button class="btn danger" id="unlink-telegram">解除绑定</button>':''}<div id="link-code-result"></div></section><section class="panel integration-card"><div class="integration-icon ai">${icon('spark')}</div><div class="integration-title"><h2>AI 自然语言记账</h2><span class="badge ${i.ai_configured?'posted':'draft'}">${i.ai_configured?'已配置':'等待配置'}</span></div><p>你说清花了什么、多少金额，AI 把它整理成待确认的账目。支持 Web 和 Telegram。</p><div class="code-block">今天打车去客户公司，花了 38 元\n刚给团队续费了 49 美元的设计工具\n今天收到客户尾款 2,000 美元</div><div class="notice">AI 只提取一笔账目的字段，不自动付款，也不直接写入账本。你确认后，系统会再次检查金额、币种和权限。</div><h3>服务器配置项</h3><div class="code-block">AI_BASE_URL=你的兼容接口地址\nAI_API_KEY=你的接口密钥\nAI_MODEL=接口支持的模型名称</div><p class="fx-caption">密钥仅存放在服务器 .env，不会展示在浏览器。尚未配置时，Web 表单和 Telegram 按钮记账仍可使用。</p><a href="#ledger" class="btn wide">去收支明细试试 →</a></section></div>`;
+    `<div class="integration-grid"><section class="panel integration-card"><div class="integration-icon">${icon('send')}</div><div class="integration-title"><h2>Telegram 机器人</h2><span class="badge ${i.telegram_linked?'posted':'draft'}">${i.telegram_linked?'账号已绑定':'账号未绑定'}</span></div><p>按钮一步步记录，或发一句话让 AI 帮你填写。确认后，账目立即同步到 Web。</p><div class="integration-steps"><div class="integration-step"><span class="step-number">1</span><span>团队通过 BotFather 创建机器人，配置服务器的 TELEGRAM_BOT_TOKEN，并启动机器人进程。</span></div><div class="integration-step"><span class="step-number">2</span><span>点击下方生成 10 分钟内有效的一次性绑定码，在机器人私聊中发送 /start 绑定码。</span></div><div class="integration-step"><span class="step-number">3</span><span>发送 /book 按按钮记账；也可以说「今天订阅软件花了 20 美元」，确认预览后入账。</span></div></div><div class="notice">机器人配置：${i.bot_configured?'已配置':'尚未配置'} · 进程：${i.bot_online?'在线':'尚未检测到在线'}${i.bot_username?`<p>机器人：<a href="https://t.me/${esc(i.bot_username)}" target="_blank" rel="noreferrer">@${esc(i.bot_username)} ↗</a></p>`:''}</div><button class="btn primary" id="generate-link">${i.telegram_linked?'重新生成绑定码':'生成绑定码'}</button>${i.telegram_linked?' <button class="btn danger" id="unlink-telegram">解除绑定</button>':''}<div id="link-code-result"></div></section><section class="panel integration-card"><div class="integration-icon ai">${icon('spark')}</div><div class="integration-title"><h2>AI 自然语言记账</h2><span class="badge ${i.ai_configured?'posted':'draft'}">${i.ai_configured?'已配置':'等待配置'}</span></div><p>一次说一段话，AI 能同时新增多笔、修改、作废、登记报销或查询；核对操作清单后一次性入账。Web 与 Telegram 共用同一套引擎。</p><div class="code-block">昨天我垫了打车 35 元，老王垫的聚餐 240 元，\n收到客户尾款 2000 美元；\n顺便告诉我现在还能报多少。</div><div class="notice">AI 会读取最近约 120 笔账目的摘要来精准匹配“昨天那笔”“老王未报销的”，但不会发送凭证、密码或会话信息。写操作必须由你核对确认；付款只登记已完成的转账，不会发起付款。</div><h3>服务器配置项</h3><div class="code-block">AI_BASE_URL=你的兼容接口地址\nAI_API_KEY=你的接口密钥\nAI_MODEL=接口支持的模型名称\nAI_CONTEXT_ENTRIES=120\nAI_MAX_ACTIONS=20</div><p class="fx-caption">密钥仅存放在服务器 .env，不会展示在浏览器。尚未配置时，Web 表单和 Telegram 按钮记账仍可使用。</p><a href="#ledger" class="btn wide" data-ai-open>打开 AI 记账助手 →</a></section></div>`;
 }
 function currencyEditorRow(c) {
   return `<div class="currency-edit-row"><input data-cur="code" value="${esc(c.code)}" maxlength="3" aria-label="币种代码" placeholder="USD" required><input data-cur="name" value="${esc(c.name)}" maxlength="20" aria-label="币种名称" placeholder="美元" required><input data-cur="symbol" value="${esc(c.symbol)}" maxlength="8" aria-label="币种符号" placeholder="$" required><select data-cur="decimals" aria-label="币种小数位">${[0,2,3,4].map(d=>`<option ${d===c.decimals?'selected':''}>${d}</option>`).join('')}</select><button type="button" class="icon-button" data-remove-currency aria-label="移除此币种">×</button></div>`;
@@ -483,7 +498,7 @@ async function openDetail(id) {
     if(!e.reimbursed_minor&&!['reimbursed','voided'].includes(e.status)&&mine)actions.push(`<button class="btn danger" data-action="void" data-id="${id}">作废账目</button>`);
     if(e.status==='voided'&&canManage())actions.push(`<button class="btn danger" data-delete-entry="${id}">永久删除</button>`);
     const actionNames={distribute:'将收入标记为已分红到个人账户',created:'创建了账目',submit:'将草稿记入账本',approve:'历史记录：通过',reject:'历史记录：退回',pay:'登记了报销付款',edited:'修改了账目',receipt:'上传了凭证',void:'作废了账目'};
-    $('#detail-content').innerHTML=`<div class="modal-heading"><div><span class="eyebrow">ENTRY #${e.id}</span><h2>账目详情</h2></div><button class="icon-button" data-close aria-label="关闭">✕</button></div><div class="detail-hero">${entryIcon(e)}<div><h2>${e.kind==='income'?'+':'−'} ${money(e.amount,e.currency)}</h2>${settlementDisplay(e)}<p>${esc(e.description)}</p></div></div>${badge(entryStatus(e))}${e.status==='distributed'?'<p class="notice">已分红到个人账户，不计团队可用资金、报销预算或结余。</p>':''}${paymentSummary(e)}<dl class="detail-list"><div><dt>${e.kind==='income'?'经手成员':'垫付成员'}</dt><dd>${esc(e.payer_name)}</dd></div><div><dt>发生日期</dt><dd>${esc(e.date)}</dd></div><div><dt>记录来源</dt><dd>${esc(e.source)} · ${esc(e.creator_name)}</dd></div><div class="full-span"><dt>备注</dt><dd>${esc(e.note||'—')}</dd></div>${e.review_note?`<div class="full-span"><dt>处理 / 付款备注</dt><dd>${esc(e.review_note)}</dd></div>`:''}<div class="full-span"><dt>凭证</dt><dd>${e.receipt?`<a class="tiny-link" href="/api/entries/${id}/receipt" target="_blank" rel="noreferrer">下载 ${esc(e.receipt_name)} ↗</a>`:'未附凭证'}</dd></div></dl>${mine&&['draft','pending','posted','distributed'].includes(e.status)?`<label class="upload-zone"><input type="file" id="detail-receipt" data-id="${id}" accept="image/png,image/jpeg,application/pdf"><span>＋ ${e.receipt?'替换':'补充'}凭证 <small>PNG / JPG / PDF，最多 6 MB</small></span></label>`:''}${paymentHistory(e)}<h3>操作记录</h3><div class="timeline">${events.map(event=>`<div class="timeline-item">${esc(event.name)} ${esc(actionNames[event.action]||event.action)}${event.detail?`<br>${esc(event.detail)}`:''}<small>${esc(event.created_at.replace('T',' ').slice(0,19))}</small></div>`).join('')}</div><div class="detail-actions">${actions.join('')}</div>`;
+    $('#detail-content').innerHTML=`<div class="modal-heading"><div><span class="eyebrow">ENTRY #${e.id}</span><h2>账目详情</h2></div><button class="icon-button" data-close aria-label="关闭">✕</button></div><div class="detail-hero">${entryIcon(e)}<div><h2>${e.kind==='income'?'+':'−'} ${money(e.amount,e.currency)}</h2>${settlementDisplay(e)}<p>${esc(entryDescription(e))}</p></div></div>${badge(entryStatus(e))}${e.status==='distributed'?'<p class="notice">已分红到个人账户，不计团队可用资金、报销预算或结余。</p>':''}${paymentSummary(e)}<dl class="detail-list"><div><dt>${e.kind==='income'?'经手成员':'垫付成员'}</dt><dd>${esc(e.payer_name)}</dd></div><div><dt>发生日期</dt><dd>${esc(e.date)}</dd></div><div><dt>记录来源</dt><dd>${esc(({web:'Web',telegram:'Telegram',ai:'AI'})[e.source]||e.source)} · ${esc(e.creator_name)}</dd></div><div class="full-span"><dt>备注</dt><dd>${esc(e.note||'—')}</dd></div>${e.review_note?`<div class="full-span"><dt>处理 / 付款备注</dt><dd>${esc(e.review_note)}</dd></div>`:''}<div class="full-span"><dt>凭证</dt><dd>${e.receipt?`<a class="tiny-link" href="/api/entries/${id}/receipt" target="_blank" rel="noreferrer">下载 ${esc(e.receipt_name)} ↗</a>`:'未附凭证'}</dd></div></dl>${mine&&['draft','pending','posted','distributed'].includes(e.status)?`<label class="upload-zone"><input type="file" id="detail-receipt" data-id="${id}" accept="image/png,image/jpeg,application/pdf"><span>＋ ${e.receipt?'替换':'补充'}凭证 <small>PNG / JPG / PDF，最多 6 MB</small></span></label>`:''}${paymentHistory(e)}<h3>操作记录</h3><div class="timeline">${events.map(event=>`<div class="timeline-item">${esc(event.name)} ${esc(actionNames[event.action]||event.action)}${event.detail?`<br>${esc(event.detail)}`:''}<small>${esc(event.created_at.replace('T',' ').slice(0,19))}</small></div>`).join('')}</div><div class="detail-actions">${actions.join('')}</div>`;
   }catch(e){$('#detail-content').innerHTML=empty('加载失败',e.message);}
 }
 async function openAction(action,ids) {
@@ -494,7 +509,7 @@ async function openAction(action,ids) {
   $('#action-description').textContent=action==='pay'?`逐笔填写本次实际已转账的金额，可部分报销。可选择记账货币或团队结算货币，不会发起转账。`:action==='distribute'?'请确认整笔收入已分红到个人账户。记录会保留，并从团队可用资金、报销预算和结余中排除。':`即将对 ${ids.length} 笔账目执行${labels[action]}。`;
   $('#action-totals').innerHTML=action==='pay'?`剩余待报销：${groupedTotals(rows,'remaining_amount')}`:groupedTotals(rows);$('#action-note-label').hidden=action==='submit';
   const base=state.conf.reference_currency;
-  $('#action-payment-amounts').innerHTML=action==='pay'?rows.map(e=>`<div class="payment-item"><strong>#${e.id} ${esc(e.description)}</strong><small>${esc(e.payer_name)} · 原金额 ${money(e.amount,e.currency)}<br>累计已报 ${money(e.reimbursed_amount,e.currency)} · 剩余 ${money(e.remaining_amount,e.currency)}</small><label>本次付款币种<select data-payment-currency="${e.id}"><option value="${esc(e.currency)}">按记账货币 · ${esc(e.currency)}</option>${base!==e.currency?`<option value="${esc(base)}">按结算货币 · ${esc(base)}</option>`:''}</select></label><label>本次实际已报销金额<input name="payment-${e.id}" data-payment="${e.id}" type="number" inputmode="decimal" required disabled></label><small data-payment-rate="${e.id}"></small><div class="payment-after" data-payment-after="${e.id}"></div></div>`).join(''):'';
+  $('#action-payment-amounts').innerHTML=action==='pay'?rows.map(e=>`<div class="payment-item"><strong>#${e.id} ${esc(entryDescription(e))}</strong><small>${esc(e.payer_name)} · 原金额 ${money(e.amount,e.currency)}<br>累计已报 ${money(e.reimbursed_amount,e.currency)} · 剩余 ${money(e.remaining_amount,e.currency)}</small><label>本次付款币种<select data-payment-currency="${e.id}"><option value="${esc(e.currency)}">按记账货币 · ${esc(e.currency)}</option>${base!==e.currency?`<option value="${esc(base)}">按结算货币 · ${esc(base)}</option>`:''}</select></label><label>本次实际已报销金额<input name="payment-${e.id}" data-payment="${e.id}" type="number" inputmode="decimal" required disabled></label><small data-payment-rate="${e.id}"></small><div class="payment-after" data-payment-after="${e.id}"></div></div>`).join(''):'';
   $('#action-note-label').firstChild.textContent=action==='pay'?'付款方式 / 付款参考号':action==='void'?'作废原因':action==='distribute'?'分红说明':'备注';
   $('#action-form [name=note]').required=['pay','void','distribute'].includes(action);$('#action-error').textContent='';$('#action-confirm').disabled=action==='pay';$('#action-dialog').showModal();
   if(action==='pay')await Promise.all(rows.map(e=>loadPaymentQuote(e.id,e.currency)));
@@ -544,7 +559,7 @@ document.addEventListener('click',async event=>{
   if(b.hasAttribute('data-action')){openAction(b.dataset.action,[Number(b.dataset.id)]);return;}
   if(b.hasAttribute('data-delete-entry')){
     const id=Number(b.dataset.deleteEntry),e=state.entries.find(x=>x.id===id);if(!e)return;
-    if(!confirm(`确认永久删除 #${id}「${e.description}」？账目、操作记录和凭证将一并删除，无法恢复。`))return;
+    if(!confirm(`确认永久删除 #${id}「${entryDescription(e)}」？账目、操作记录和凭证将一并删除，无法恢复。`))return;
     await busy(b,async()=>{try{await api(`/entries/${id}`,'DELETE');$('#detail-dialog').close();state.selected.delete(id);await refresh();toast(`已永久删除 #${id}`);}catch(err){toast(err.message,true);}});return;
   }
   if(b.hasAttribute('data-remove-currency')){b.closest('.currency-edit-row').remove();updateCurrencySelects();return;}
@@ -568,7 +583,10 @@ document.addEventListener('click',async event=>{
     try{await api('/members/'+m.id,'PATCH',{password:value});toast('密码已重置，请把新密码私下交给成员');}catch(e){toast(e.message,true);}return;
   }
 });
-document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.matches('tr[data-entry]'))openDetail(Number(e.target.dataset.entry));});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&e.target.matches('tr[data-entry]'))openDetail(Number(e.target.dataset.entry));
+  if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)&&e.target.matches('#ai-form textarea')){e.preventDefault();$('#ai-form').requestSubmit();}
+});
 document.addEventListener('input',event=>{
   const el=event.target;
   if(el.id==='search-entries'){state.filter.text=el.value;$('#ledger-results').innerHTML=ledgerResults();}

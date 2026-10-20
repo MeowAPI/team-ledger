@@ -30,8 +30,8 @@ def _compact(row):
     item = {
         'id': row['id'], 'date': row['date'], 'kind': row['kind'],
         'amount': _amount(row, row['amount_minor']), 'currency': row['currency'],
-        'description': row['description'][:120], 'payer_id': row['payer_id'],
-        'payer': row['payer_name'], 'status': row['status'], 'version': row['version'],
+        'description': row['description'][:120], 'payer': row['payer_name'],
+        'status': row['status'],
     }
     if row['kind'] == 'expense':
         item['remaining'] = _amount(row, row['amount_minor'] - row['reimbursed_minor'])
@@ -44,8 +44,7 @@ def _compact(row):
 
 def _rows(conn, where='', params=(), limit=None):
     sql = ('SELECT e.id,e.kind,e.amount_minor,e.currency,e.decimals,e.description,e.date,'
-           'e.payer_id,e.status,e.reimbursed_minor,e.note,u.name payer_name,'
-           '(SELECT COALESCE(MAX(id),0) FROM events WHERE entry_id=e.id) version '
+           'e.status,e.reimbursed_minor,e.note,u.name payer_name '
            'FROM entries e JOIN users u ON u.id=e.payer_id ' + where +
            ' ORDER BY e.date DESC,e.id DESC')
     values = list(params)

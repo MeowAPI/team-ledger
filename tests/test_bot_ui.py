@@ -140,6 +140,116 @@ class TelegramUiTest(unittest.TestCase):
         self.click(7,f'd:{token}:save')
         self.assertEqual(self.client.get('/api/entries').json()[0]['amount'],'500')
 
+    def test_manual_commands_and_buttons_confirm_without_description_or_note(self):
+        self.link_bot()
+        cases=(('/book',None,'expense','USD'),('/income',None,'income','CNY'),
+               (None,'new','expense','CNY'),(None,'newincome','income','CNY'))
+        for index,(command,button,kind,currency) in enumerate(cases):
+            with self.subTest(command=command,button=button):
+                start=10+index*10
+                if command:
+                    bot.process_update(self.message(start,command))
+                else:
+                    self.click(start,button)
+                token=self.draft()['token']
+                self.assertEqual(self.draft()['step'],'currency')
+                self.click(start+1,f'd:{token}:cur:{currency}')
+                self.assertEqual(self.draft()['step'],'amount')
+                self.assertTrue(self.last_message()['reply_markup']['force_reply'])
+                bot.process_update(self.message(start+2,'2'))
+                self.assertEqual(self.draft()['step'],'confirm')
+                data=json.loads(self.draft()['payload'])
+                self.assertEqual((data['description'],data['note']),('',''))
+                preview=self.last_message()
+                self.assertIn('未填写说明',preview['text'])
+                callbacks=[b['callback_data'] for row in preview['reply_markup']['inline_keyboard'] for b in row]
+                for field in ('description','note'):
+                    self.assertIn(f'd:{token}:edit:{field}',callbacks)
+                if index==0:
+                    self.assertIn('≈ ¥14.00 CNY',preview['text'])
+                    self.assertIn('2026-10-16',preview['text'])
+                self.assertEqual(len(self.client.get('/api/entries').json()),index)
+                self.click(start+3,f'd:{token}:save')
+                self.click(start+3,f'd:{token}:save')
+                self.click(start+4,f'd:{token}:save')
+                entries=self.client.get('/api/entries').json()
+                self.assertEqual(len(entries),index+1)
+                saved=next(e for e in entries if e['source_key']==f'tg:draft:{token}')
+                self.assertEqual((saved['kind'],saved['description'],saved['note']),(kind,'',''))
+
+    def test_preview_can_fill_and_clear_optional_fields_but_amount_cannot_be_skipped(self):
+        self.link_bot(); self.click(2,'new'); token=self.draft()['token']
+        self.click(3,f'd:{token}:cur:CNY')
+        bot.process_update(self.message(4,'-'))
+        self.assertEqual(self.draft()['step'],'amount')
+        self.assertNotIn('amount',json.loads(self.draft()['payload']))
+        bot.process_update(self.message(5,'35'))
+        self.assertEqual(self.draft()['step'],'confirm')
+        self.click(6,f'd:{token}:edit:amount')
+        bot.process_update(self.message(7,'-'))
+        self.assertEqual(self.draft()['step'],'edit_amount')
+        self.assertEqual(json.loads(self.draft()['payload'])['amount'],'35')
+        self.click(8,f'd:{token}:back')
+        for index,field in enumerate(('description','note')):
+            start=10+index*4
+            self.click(start,f'd:{token}:edit:{field}')
+            bot.process_update(self.message(start+1,'  补充内容  '))
+            self.assertEqual(self.draft()['step'],'confirm')
+            self.assertEqual(json.loads(self.draft()['payload'])[field],'补充内容')
+            self.assertIn('补充内容',self.last_message()['text'])
+            self.click(start+2,f'd:{token}:edit:{field}')
+            bot.process_update(self.message(start+3,'-'))
+            self.assertEqual(self.draft()['step'],'confirm')
+            self.assertEqual(json.loads(self.draft()['payload'])[field],'')
+        self.click(20,f'd:{token}:save')
+        entry=self.client.get('/api/entries').json()[0]
+        self.assertEqual((entry['description'],entry['note'],entry['amount']),('','','35.00'))
+
+    def test_existing_entry_can_clear_description_and_note(self):
+        self.link_bot(); entry=self.entry(description='原说明',note='原备注')
+        self.click(2,f'edit:{entry["id"]}'); token=self.draft()['token']
+        self.click(3,f'd:{token}:edit:description')
+        bot.process_update(self.message(4,'-'))
+        self.click(5,f'd:{token}:edit:note')
+        bot.process_update(self.message(6,'-'))
+        self.click(7,f'd:{token}:save')
+        entries=self.client.get('/api/entries').json()
+        self.assertEqual(len(entries),1)
+        self.assertEqual((entries[0]['id'],entries[0]['description'],entries[0]['note'],entries[0]['status']),
+                         (entry['id'],'','','pending'))
+        with db() as conn:
+            row=conn.execute('SELECT description,note FROM entries WHERE id=?',(entry['id'],)).fetchone()
+            self.assertEqual(tuple(row),('',''))
+
+    def test_legacy_description_step_can_resume_and_skip_with_dash(self):
+        self.link_bot(); self.click(2,'new'); token=self.draft()['token']
+        payload={'kind':'expense','amount':'35','currency':'CNY','date':config.today(),'note':''}
+        with db(write=True) as conn:
+            conn.execute('UPDATE tg_drafts SET step=?,payload=? WHERE token=?',('description',json.dumps(payload),token))
+        self.click(3,'home')
+        self.click(4,f'd:{token}:resume')
+        self.assertEqual(self.draft()['step'],'description')
+        self.assertTrue(self.last_message()['reply_markup']['force_reply'])
+        bot.process_update(self.message(5,'-'))
+        self.assertEqual(self.draft()['step'],'confirm')
+        self.assertIn('未填写说明',self.last_message()['text'])
+        self.click(6,f'd:{token}:save')
+        entry=self.client.get('/api/entries').json()[0]
+        self.assertEqual((entry['description'],entry['note']),('',''))
+
+    def test_preview_missing_description_key_is_safe_and_editable(self):
+        self.link_bot(); self.click(2,'new'); token=self.draft()['token']
+        payload={'kind':'expense','amount':'35','currency':'CNY','date':config.today(),'note':''}
+        with db(write=True) as conn:
+            conn.execute('UPDATE tg_drafts SET step=?,payload=? WHERE token=?',('confirm',json.dumps(payload),token))
+        self.click(3,f'd:{token}:resume')
+        preview=self.last_message()
+        self.assertIn('未填写说明',preview['text'])
+        callbacks=[b['callback_data'] for row in preview['reply_markup']['inline_keyboard'] for b in row]
+        self.assertIn(f'd:{token}:edit:description',callbacks)
+        self.click(4,f'd:{token}:save')
+        self.assertEqual(self.client.get('/api/entries').json()[0]['description'],'')
+
     def test_payment_needs_note_and_confirmation_and_replay_is_safe(self):
         self.link_bot(); entry=self.entry()
         self.click(2,f'pay:{entry["id"]}')
@@ -287,11 +397,51 @@ class TelegramUiTest(unittest.TestCase):
         update['message']['reply_to_message']={'message_id':600}
         update['message']['message_thread_id']=12
         bot.process_update(update)
-        self.assertEqual(self.draft()['step'],'description')
+        self.assertEqual(self.draft()['step'],'confirm')
         self.assertEqual(self.last_message()['message_thread_id'],12)
-        bot.process_update({**update,'update_id':7})
-        self.assertEqual(self.draft()['step'],'description')
-        self.assertNotIn('description',json.loads(self.draft()['payload']))
+        before=self.draft()['payload']
+        replay={**update,'update_id':7,'message':{**update['message'],'text':'99'}}
+        bot.process_update(replay)
+        self.assertEqual(self.draft()['step'],'confirm')
+        self.assertEqual(self.draft()['payload'],before)
+        self.assertEqual(json.loads(before)['description'],'')
+        self.assertEqual(json.loads(before)['amount'],'88')
+
+    def test_group_optional_fields_clear_only_when_replying_to_current_prompt(self):
+        self.link_bot(); self.allow_group(); self.clear_outbox()
+        entry=self.entry(description='原说明',note='原备注')
+        self.click(2,f'edit:{entry["id"]}',chat=-555,private=False)
+        token=self.draft()['token']
+        for index,field in enumerate(('description','note')):
+            start=10+index*10
+            self.click(start,f'd:{token}:edit:{field}',chat=-555,private=False)
+            prompt=self.last_message()
+            self.assertTrue(prompt['reply_markup']['force_reply'])
+            self.assertEqual(prompt['message_thread_id'],12)
+            prompt_id=600+index
+            def deliver(method,payload):
+                self.assertNotIn('_prompt',payload)
+                return {'message_id':prompt_id} if method=='sendMessage' else True
+            with patch('app.bot.api',side_effect=deliver):
+                bot.drain_outbox()
+            before=self.draft()['payload']
+            for offset,reply_id in ((1,None),(2,prompt_id-1)):
+                update=self.message(start+offset,'-',chat=-555,private=False)
+                update['message']['message_thread_id']=12
+                if reply_id is not None:
+                    update['message']['reply_to_message']={'message_id':reply_id}
+                bot.process_update(update)
+                self.assertEqual(self.draft()['step'],'edit_'+field)
+                self.assertEqual(self.draft()['payload'],before)
+            update=self.message(start+3,'-',chat=-555,private=False)
+            update['message']['message_thread_id']=12
+            update['message']['reply_to_message']={'message_id':prompt_id}
+            bot.process_update(update)
+            self.assertEqual(self.draft()['step'],'confirm')
+            self.assertEqual(json.loads(self.draft()['payload'])[field],'')
+        self.click(30,f'd:{token}:save',chat=-555,private=False)
+        saved=self.client.get('/api/entries').json()[0]
+        self.assertEqual((saved['id'],saved['description'],saved['note']),(entry['id'],'',''))
 
     def test_prompts_for_other_draft_are_not_consumed_in_group(self):
         self.link_bot(); self.allow_group(); other=self.new_member()

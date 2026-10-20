@@ -436,9 +436,12 @@ def ai_plan_preview(body: dict, request: Request):
         conf = settings(conn)
         context = ai_context.build(conn, conf, user)
     raw = ai.plan(text, conf, context, history)
-    with db(write=True) as conn:
+    # Fetch FX before taking the write lock; rate fetching may update the cache.
+    with db() as conn:
         conf = settings(conn)
         rates = ai_plan.needed_rates(conn, conf, raw)
+    with db(write=True) as conn:
+        conf = settings(conn)
         plan = ai_plan.resolve(conn, user, conf, raw, context, rates)
         return ai_plan.store(conn, user, plan, 'web')
 

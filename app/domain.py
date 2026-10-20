@@ -83,7 +83,7 @@ def normalized_entry(conn, user, body):
         admin(user)
     cur = currency(conf, body.get('currency', conf['default_currency']))
     amount = minor_amount(body.get('amount', ''), cur['decimals'])
-    description = text_value(body.get('description', ''), '用途 / 收入说明', 120)
+    description = text_value(body.get('description', ''), '用途 / 收入说明', 120, False)
     try:
         entry_date = date.fromisoformat(body.get('date', ''))
         if entry_date.year < 2000 or entry_date.year > 2100:

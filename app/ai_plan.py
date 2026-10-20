@@ -53,6 +53,10 @@ def _date_value(value, default=None):
         if match.group(1) == '上':
             target -= timedelta(days=7)
         return target.isoformat()
+    match = re.fullmatch(r'(?:周|星期)([一二三四五六日天])', text)
+    if match:
+        monday = today - timedelta(days=today.weekday())
+        return (monday + timedelta(days=weekdays[match.group(1)])).isoformat()
     text = text.replace('年', '-').replace('月', '-').replace('日', '').replace('号', '')
     text = text.replace('/', '-').replace('.', '-').strip('-')
     match = re.fullmatch(r'(\d{4})-(\d{1,2})-(\d{1,2})', text)
@@ -116,6 +120,10 @@ def _money(amount, code, conf):
     except (InvalidOperation, ValueError):
         return f'{amount} {code}'
     return f'{cur["symbol"]}{value:,.{cur["decimals"]}f} {code}'
+
+
+def _entry_desc(entry):
+    return entry.get('description') or '未填写说明'
 
 
 def _members(conn):
@@ -213,9 +221,7 @@ def _resolve_create(conn, user, conf, action):
         except HTTPException as exc:
             _error(card, exc)
     description = str(action.get('description') or '').strip()
-    if not description:
-        card['errors'].append('缺少用途 / 收入说明')
-    elif len(description) > 120:
+    if len(description) > 120:
         card['errors'].append('用途最多 120 个字符')
         description = description[:120]
     if action.get('date') in (None, ''):
@@ -251,7 +257,7 @@ def _resolve_create(conn, user, conf, action):
                         'date': entry_date, 'payer_id': payer_id, 'payer_name': payer_name,
                         'status': status, 'note': note}
     state = '草稿' if status == 'draft' else '已分红' if status == 'distributed' else '团队在账' if kind == 'income' else '待报销'
-    card['summary'] = f'{description or "（缺少说明）"} · {_money(amount or 0, code, conf)} · {entry_date} · {payer_name} · {state}'
+    card['summary'] = f'{description or "未填写说明"} · {_money(amount or 0, code, conf)} · {entry_date} · {payer_name} · {state}'
     return card
 
 
@@ -262,7 +268,7 @@ def _resolve_edit(conn, user, conf, action, context_ids):
         card['warnings'].append(warning)
     if entry['kind'] != 'expense' or entry['status'] not in ('draft', 'pending') or entry['reimbursed_minor']:
         card['errors'].append('仅没有报销记录的草稿或待报销支出可以修改')
-        card['summary'] = f'#{entry["id"]} {entry["description"]} · 当前状态不允许修改'
+        card['summary'] = f'#{entry["id"]} {_entry_desc(entry)} · 当前状态不允许修改'
         card['resolved'] = {'id': entry['id'], 'version': entry['version']}
         return card
     if action.get('kind') and action.get('kind') != entry['kind']:
@@ -283,9 +289,7 @@ def _resolve_edit(conn, user, conf, action, context_ids):
             _error(card, exc)
     if 'description' in action:
         description = str(action.get('description') or '').strip()
-        if not description:
-            card['errors'].append('用途不能为空')
-        elif len(description) > 120:
+        if len(description) > 120:
             card['errors'].append('用途最多 120 个字符')
         else:
             body['description'] = description
@@ -305,8 +309,8 @@ def _resolve_edit(conn, user, conf, action, context_ids):
         except HTTPException as exc:
             _error(card, exc)
     card['resolved'] = {'id': entry['id'], 'version': entry['version'], **body, 'payer_name': payer_name}
-    before = f'{_money(entry["amount"], entry["currency"], conf)} · {entry["description"]}'
-    after = f'{_money(body["amount"], body["currency"], conf)} · {body["description"]}'
+    before = f'{_money(entry["amount"], entry["currency"], conf)} · {entry["description"] or "未填写说明"}'
+    after = f'{_money(body["amount"], body["currency"], conf)} · {body["description"] or "未填写说明"}'
     card['summary'] = f'#{entry["id"]} 修改：{before} → {after} · {body["date"]}'
     return card
 
@@ -335,7 +339,7 @@ def _resolve_transition(conn, user, conf, action, context_ids):
         note = str(action.get('note') or '').strip()[:500] or '通过 AI 助手标记已分红到个人账户'
         action_name = 'distribute'
     card['resolved'] = {'id': entry['id'], 'version': entry['version'], 'action': action_name, 'note': note}
-    card['summary'] = f'#{entry["id"]} {entry["description"]} · {_money(entry["amount"], entry["currency"], conf)} · {labels[kind]}'
+    card['summary'] = f'#{entry["id"]} {_entry_desc(entry)} · {_money(entry["amount"], entry["currency"], conf)} · {labels[kind]}'
     if note:
         card['summary'] += f' · 备注：{note[:60]}'
     return card
@@ -350,7 +354,7 @@ def _resolve_delete(conn, user, conf, action, context_ids):
         card['errors'].append('仅已作废账目可以永久删除；请先作废。')
     card['resolved'] = {'id': entry['id'], 'version': entry['version'], 'description': entry['description'],
                         'amount': entry['amount'], 'currency': entry['currency']}
-    card['summary'] = f'#{entry["id"]} {entry["description"]} · {_money(entry["amount"], entry["currency"], conf)} · 永久删除'
+    card['summary'] = f'#{entry["id"]} {_entry_desc(entry)} · {_money(entry["amount"], entry["currency"], conf)} · 永久删除'
     card['warnings'].append('永久删除会清除账目、操作记录、付款记录和凭证，无法恢复。')
     return card
 
@@ -363,7 +367,7 @@ def _resolve_pay(conn, user, conf, action, context_ids, rates):
     if entry['kind'] != 'expense' or entry['status'] != 'pending' or not entry['remaining_minor']:
         card['errors'].append('只有尚有剩余金额的待报销支出可以登记付款')
         card['resolved'] = {'id': entry['id'], 'version': entry['version']}
-        card['summary'] = f'#{entry["id"]} {entry["description"]} · 当前状态不允许登记付款'
+        card['summary'] = f'#{entry["id"]} {_entry_desc(entry)} · 当前状态不允许登记付款'
         return card
     requested = action.get('settlement_currency') or 'original'
     code = entry['currency'] if requested in ('original', '', None) else str(requested).upper()
@@ -371,6 +375,8 @@ def _resolve_pay(conn, user, conf, action, context_ids, rates):
         card['errors'].append('付款币种请选择记账货币或团队结算货币')
     raw_amount = action.get('amount')
     amount = _amount_value(raw_amount)
+    if raw_amount not in (None, '') and amount is None:
+        card['errors'].append('付款金额格式不正确')
     try:
         note = _text(action.get('note'), 500) or '通过 AI 助手登记付款'
     except PlanQuestion as exc:
@@ -394,7 +400,7 @@ def _resolve_pay(conn, user, conf, action, context_ids, rates):
                             'currency': quote['currency'], 'quote_id': quote['id'], 'note': note,
                             'entry_amount': allocation_text, 'entry_currency': entry['currency'],
                             'remaining_amount': remaining_text}
-        card['summary'] = (f'#{entry["id"]} {entry["description"]} · 本次付款 {_money(pay_amount, quote["currency"], conf)}'
+        card['summary'] = (f'#{entry["id"]} {_entry_desc(entry)} · 本次付款 {_money(pay_amount, quote["currency"], conf)}'
                            f' · 抵扣 {_money(allocation_text, entry["currency"], conf)} · 剩余 {_money(remaining_text, entry["currency"], conf)}')
         card['warnings'].append('请确认这笔转账已经实际完成；系统只登记，不会发起付款。')
     elif quote:
@@ -406,7 +412,7 @@ def _resolve_pay(conn, user, conf, action, context_ids, rates):
     return card
 
 
-def _resolve_batch(conn, user, conf, action, rates):
+def _resolve_batch(conn, user, conf, action, rates, context_ids):
     card = _card('batch_pay', '批量登记报销')
     requested = action.get('settlement_currency') or 'original'
     mode = 'original' if requested in ('original', '', None) else 'settlement'
@@ -421,13 +427,22 @@ def _resolve_batch(conn, user, conf, action, rates):
     except PlanQuestion as exc:
         card['errors'].append(str(exc))
         date_from = date_to = None
-    entry_ids = []
+    entry_ids, id_warnings = [], []
     if isinstance(action.get('ids'), list):
         for value in action['ids']:
             try:
                 entry_ids.append(int(value))
             except (TypeError, ValueError):
                 card['errors'].append('账目编号无效')
+    for entry_id in entry_ids:
+        try:
+            entry = entry_view(conn, entry_id)
+        except HTTPException:
+            raise PlanQuestion(f'没有找到账目 #{entry_id}，请核对编号。')
+        if entry['kind'] != 'expense' or entry['status'] != 'pending':
+            card['errors'].append(f'#{entry_id} 不是待报销支出，不能登记付款。')
+        if entry_id not in context_ids:
+            id_warnings.append(f'#{entry_id} 不在最近摘要中，请核对后再确认。')
     try:
         note = _text(action.get('note'), 500) or '通过 AI 助手批量登记付款'
     except PlanQuestion as exc:
@@ -452,12 +467,13 @@ def _resolve_batch(conn, user, conf, action, rates):
     else:
         card['resolved'] = {'mode': mode, 'payer_id': payer_id, 'payer_name': payer_name, 'entry_ids': entry_ids,
                             'date_from': date_from, 'date_to': date_to, 'note': note}
+    card['warnings'].extend(id_warnings)
     return card
 
 
 # --- read-only queries ------------------------------------------------------
 
-def _query_clauses(conn, user, conf, action, default_status=True):
+def _query_clauses(conn, user, conf, action, default_status=True, exclude_distributed=False):
     clauses, params = [], []
     scope = action.get('scope')
     if scope == 'mine':
@@ -475,6 +491,8 @@ def _query_clauses(conn, user, conf, action, default_status=True):
         params.append(status)
     elif default_status:
         clauses.append("e.status NOT IN ('draft','voided')")
+        if exclude_distributed:
+            clauses.append("NOT (e.kind='income' AND e.status='distributed')")
     code = action.get('filter_currency')
     if code:
         try:
@@ -501,8 +519,8 @@ def _query_clauses(conn, user, conf, action, default_status=True):
     return clauses, params
 
 
-def _filtered_rows(conn, user, conf, action, default_status=True):
-    clauses, params = _query_clauses(conn, user, conf, action, default_status)
+def _filtered_rows(conn, user, conf, action, default_status=True, exclude_distributed=False):
+    clauses, params = _query_clauses(conn, user, conf, action, default_status, exclude_distributed)
     where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
     rows = conn.execute('SELECT e.id FROM entries e JOIN users u ON u.id=e.payer_id' + where +
                         ' ORDER BY e.date DESC,e.id DESC', params).fetchall()
@@ -527,7 +545,7 @@ def _list_query(conn, user, conf, action):
 
 
 def _summary_query(conn, user, conf, action):
-    clauses, params = _query_clauses(conn, user, conf, action)
+    clauses, params = _query_clauses(conn, user, conf, action, exclude_distributed=True)
     where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
     rows = conn.execute(
         'SELECT e.kind,e.currency,e.decimals,e.amount_minor,e.payer_id,u.name payer_name '
@@ -565,14 +583,32 @@ def _summary_query(conn, user, conf, action):
     return card
 
 
-def _funds_card(kind, conf, action):
+def _report_with_conn(conn, base=None, scenario=None):
+    """Like fx.report, but reads the caller's connection (sees uncommitted writes)."""
+    conf = settings(conn)
+    base = base or conf['reference_currency']
+    currency(conf, base)
+    entries = [dict(row) for row in conn.execute(
+        'SELECT e.*,u.name payer_name FROM entries e JOIN users u ON u.id=e.payer_id')]
+    payments = [dict(row) for row in conn.execute('SELECT * FROM payments')]
+    codes = {e['currency'] for e in entries
+             if (e['kind'] == 'income' and e['status'] == 'posted') or e['status'] in ('pending', 'reimbursed')}
+    codes.update(payment['currency'] for payment in payments)
+    if scenario:
+        cur = currency(conf, scenario['currency'])
+        minor_amount(scenario['amount'], cur['decimals'])
+        codes.add(cur['code'])
+    return fx.calculate(entries, conf, fx.cached_rates(base, codes), scenario, payments)
+
+
+def _funds_card(kind, conf, action, conn):
     base = str(action.get('base') or conf['reference_currency']).upper()
     try:
         currency(conf, base)
     except HTTPException:
         base = conf['reference_currency']
     try:
-        report = fx.report(base)
+        report = _report_with_conn(conn, base)
     except Exception:
         report = None
     if not report:
@@ -584,6 +620,8 @@ def _funds_card(kind, conf, action):
             'balances': report.get('balances', {}), 'distributed_balances': report.get('distributed_balances', {})}
     if not report.get('complete'):
         card['warning'] = report.get('fx', {}).get('warning') or '汇率不完整，跨币种金额暂不可用。'
+    elif report.get('fx', {}).get('stale'):
+        card['warning'] = report.get('fx', {}).get('warning') or '正在使用过期的汇率缓存，跨币种金额仅供参考。'
     if kind == 'due':
         card['members'] = report.get('members', [])
     elif kind == 'funds':
@@ -618,7 +656,7 @@ def run_query(conn, user, conf, action):
         if query == 'summary':
             return _summary_query(conn, user, conf, action)
         if query in ('balance', 'due', 'funds'):
-            return _funds_card(query, conf, action)
+            return _funds_card(query, conf, action, conn)
         if query == 'simulate_income':
             base = str(action.get('base') or conf['reference_currency']).upper()
             cur = currency(conf, str(action.get('simulate_currency') or conf['reference_currency']).upper())
@@ -626,13 +664,14 @@ def run_query(conn, user, conf, action):
             if amount in (None, 'FULL'):
                 return {'kind': 'simulation', 'complete': False, 'base': base, 'warning': '请提供模拟进账金额。'}
             minor_amount(amount, cur['decimals'])
-            report = fx.report(base, {'amount': amount, 'currency': cur['code']})
+            report = _report_with_conn(conn, base, {'amount': amount, 'currency': cur['code']})
             return {'kind': 'simulation', 'complete': bool(report.get('complete')), 'base': report.get('base'),
                     'cash': report.get('cash'), 'due': report.get('due'), 'reserve': report.get('reserve'),
                     'payable': report.get('payable'), 'remaining': report.get('remaining'),
                     'shortage': report.get('shortage'), 'extra': report.get('extra'),
                     'members': report.get('members', []),
-                    'warning': report.get('fx', {}).get('warning') if not report.get('complete') else None}
+                    'warning': report.get('fx', {}).get('warning')
+                    if (not report.get('complete') or report.get('fx', {}).get('stale')) else None}
         return {'kind': 'error', 'error': f'不支持的查询：{query}'}
     except PlanQuestion as exc:
         return {'kind': 'error', 'error': str(exc)}
@@ -644,9 +683,22 @@ def run_query(conn, user, conf, action):
 
 def resolve(conn, user, conf, raw, context, rates=None):
     actions, results = [], []
-    questions = list(raw.get('questions') or [])
+    raw_questions = raw.get('questions') if isinstance(raw.get('questions'), list) else []
+    questions = list(raw_questions)
+    raw_actions = raw.get('actions') if isinstance(raw.get('actions'), list) else []
     context_ids = {item['id'] for item in context.get('entries', [])}
-    for action in raw.get('actions', []):
+    seen_write, targeted = False, set()
+
+    def guard_targets(ids):
+        duplicates = sorted(set(ids) & targeted)
+        if duplicates:
+            questions.append('账目 ' + '、'.join(f'#{entry_id}' for entry_id in duplicates) +
+                             ' 在同一份清单里被多次操作，请分成两步确认。')
+            return False
+        targeted.update(ids)
+        return True
+
+    for action in raw_actions:
         action_type = action.get('type')
         try:
             if action_type == 'query':
@@ -655,30 +707,53 @@ def resolve(conn, user, conf, raw, context, rates=None):
                                 'card': run_query(conn, user, conf, action)})
             elif action_type == 'create_entry':
                 _append(actions, _resolve_create(conn, user, conf, action))
+                seen_write = True
             elif action_type == 'edit_entry':
-                _append(actions, _resolve_edit(conn, user, conf, action, context_ids))
+                ids = _ids(action)
+                if not ids:
+                    raise PlanQuestion('请指明要修改的账目编号。')
+                if guard_targets(ids[:1]):
+                    if action.get('id') is None:
+                        action = {**action, 'id': ids[0]}
+                    _append(actions, _resolve_edit(conn, user, conf, action, context_ids))
+                    seen_write = True
             elif action_type in ('void_entry', 'submit_entry', 'distribute_income'):
                 ids = _ids(action)
                 if not ids:
                     raise PlanQuestion('请指明要处理的账目编号。')
-                for entry_id in ids:
-                    single = dict(action)
-                    single['id'] = entry_id
-                    single.pop('ids', None)
-                    _append(actions, _resolve_transition(conn, user, conf, single, context_ids))
+                if guard_targets(ids):
+                    for entry_id in ids:
+                        single = dict(action)
+                        single['id'] = entry_id
+                        single.pop('ids', None)
+                        _append(actions, _resolve_transition(conn, user, conf, single, context_ids))
+                    seen_write = True
             elif action_type == 'pay_entry':
-                _append(actions, _resolve_pay(conn, user, conf, action, context_ids, rates))
+                ids = _ids(action)
+                if not ids:
+                    raise PlanQuestion('请指明要登记付款的账目编号。')
+                if guard_targets(ids[:1]):
+                    if action.get('id') is None:
+                        action = {**action, 'id': ids[0]}
+                    _append(actions, _resolve_pay(conn, user, conf, action, context_ids, rates))
+                    seen_write = True
             elif action_type == 'delete_entry':
                 ids = _ids(action)
                 if not ids:
                     raise PlanQuestion('请指明要永久删除的账目编号。')
-                for entry_id in ids:
-                    single = dict(action)
-                    single['id'] = entry_id
-                    single.pop('ids', None)
-                    _append(actions, _resolve_delete(conn, user, conf, single, context_ids))
+                if guard_targets(ids):
+                    for entry_id in ids:
+                        single = dict(action)
+                        single['id'] = entry_id
+                        single.pop('ids', None)
+                        _append(actions, _resolve_delete(conn, user, conf, single, context_ids))
+                    seen_write = True
             elif action_type == 'batch_pay':
-                _append(actions, _resolve_batch(conn, user, conf, action, rates))
+                if seen_write:
+                    questions.append('批量报销需要基于最新账本。请先确认前面的操作，再单独发起批量报销。')
+                else:
+                    _append(actions, _resolve_batch(conn, user, conf, action, rates, context_ids))
+                    seen_write = True
             else:
                 questions.append(f'无法识别的操作类型：{action_type}')
         except PlanQuestion as exc:
@@ -687,6 +762,7 @@ def resolve(conn, user, conf, raw, context, rates=None):
             card = _card(action_type or 'unknown', '无法执行')
             card['errors'].append(str(exc.detail))
             _append(actions, card)
+            seen_write = True
     # Keep indexes stable and unique for the client.
     counter = 0
     for card in actions:
@@ -836,16 +912,32 @@ def execute(conn, user, plan_id, selected):
 
 def needed_rates(conn, conf, raw):
     """Fetch FX once, outside the write lock, only when the plan needs it."""
-    need = False
-    for action in raw.get('actions', []):
+    actions = raw.get('actions') if isinstance(raw.get('actions'), list) else []
+    need, query_bases = False, set()
+    for action in actions:
         if action.get('type') == 'batch_pay':
             need = True
         elif action.get('type') == 'pay_entry' and action.get('settlement_currency') not in (None, '', 'original'):
             need = True
-    if not need:
+        elif action.get('type') == 'query' and action.get('query') in ('balance', 'due', 'funds', 'simulate_income'):
+            base = str(action.get('base') or conf['reference_currency']).upper()
+            try:
+                currency(conf, base)
+                query_bases.add(base)
+            except HTTPException:
+                pass
+    if not need and not query_bases:
         return None
     codes = {row['currency'] for row in conn.execute("SELECT DISTINCT currency FROM entries WHERE status IN ('pending','reimbursed','posted')")}
     codes.add(conf['reference_currency'])
+    # Warm query-only bases before the write lock; _report_with_conn then uses cache only.
+    for base in query_bases - {conf['reference_currency']}:
+        try:
+            fx.rates_for(base, codes)
+        except Exception:
+            pass
+    if not need:
+        return None
     try:
         return fx.rates_for(conf['reference_currency'], codes)
     except Exception:

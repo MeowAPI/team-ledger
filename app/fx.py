@@ -34,6 +34,27 @@ def fetch_rates(base, codes):
     return result
 
 
+def cached_rates(base, codes):
+    """Read-only rates for use inside an open write transaction (never fetches)."""
+    codes = set(codes) - {base}
+    result = {'base': base, 'rates': {base: {'rate': '1', 'date': None}},
+              'source': 'Frankfurter · 每日参考汇率', 'stale': False, 'missing': [], 'warning': None}
+    if not codes:
+        return result
+    with db() as conn:
+        row = conn.execute('SELECT * FROM fx_cache WHERE base=?', (base,)).fetchone()
+    cached = json.loads(row['payload']) if row else {}
+    fresh = row and time.time() - row['fetched_at'] < float(os.getenv('FX_CACHE_HOURS', '12')) * 3600
+    result['rates'].update({c: cached[c] for c in codes if c in cached})
+    result['missing'] = sorted(codes - set(cached))
+    result['stale'] = not fresh
+    if not fresh:
+        result['warning'] = '汇率缓存已过期或尚未获取，跨币种金额仅供参考。'
+    elif result['missing']:
+        result['warning'] = '汇率缓存缺少部分币种，跨币种金额暂不可用。'
+    return result
+
+
 def rates_for(base, codes, force=False):
     codes = set(codes) - {base}
     result = {'base': base, 'rates': {base: {'rate': '1', 'date': None}},

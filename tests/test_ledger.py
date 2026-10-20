@@ -149,6 +149,82 @@ class LedgerTest(unittest.TestCase):
         payload['amount']='20'
         self.assertEqual(self.client.post('/api/entries',json=payload,headers=headers).status_code,409)
 
+    def test_entry_description_and_note_are_optional_and_stored_empty(self):
+        for kind in ('expense','income'):
+            for description in ({},{'description':''},{'description':' \t\n '}):
+                for note in ({},{'note':''},{'note':' \n\t '}):
+                    with self.subTest(kind=kind,description=description,note=note):
+                        body={'kind':kind,'amount':'10','currency':'CNY','date':config.today(),**description,**note}
+                        response=self.client.post('/api/entries',json=body,
+                            headers={**self.headers,'Idempotency-Key':secrets.token_hex(16)})
+                        self.assertEqual(response.status_code,200,response.text)
+                        entry=response.json()
+                        self.assertEqual((entry['description'],entry['note']),('',''))
+                        self.assertEqual(entry['status'],'pending' if kind=='expense' else 'posted')
+        with db() as conn:
+            rows=conn.execute('SELECT description,note FROM entries').fetchall()
+            self.assertEqual(len(rows),18)
+            self.assertTrue(all(tuple(row)==('','') for row in rows))
+
+    def test_entry_update_can_clear_and_refill_description_and_note(self):
+        entry=self.entry(description='原说明',note='原备注')
+        url=f'/api/entries/{entry["id"]}'
+        for empty in ({},{'description':'','note':''},{'description':' \t\n ','note':' \n\t '}):
+            with self.subTest(empty=empty):
+                body={'kind':'expense','amount':'10','currency':'CNY','date':config.today(),**empty}
+                cleared=self.client.put(url,json=body,headers=self.headers)
+                self.assertEqual(cleared.status_code,200,cleared.text)
+                self.assertEqual((cleared.json()['description'],cleared.json()['note']),('',''))
+                with db() as conn:
+                    saved=conn.execute('SELECT description,note FROM entries WHERE id=?',(entry['id'],)).fetchone()
+                    self.assertEqual(tuple(saved),('',''))
+                refilled=self.client.put(url,json={**body,'description':'  补充说明  ','note':'  补充备注  '},headers=self.headers)
+                self.assertEqual(refilled.status_code,200,refilled.text)
+                self.assertEqual((refilled.json()['description'],refilled.json()['note']),('补充说明','补充备注'))
+        self.assertEqual(len(self.client.get('/api/entries').json()),1)
+
+    def test_optional_entry_text_still_rejects_wrong_types_and_excess_length(self):
+        for kind in ('expense','income'):
+            entry=self.entry(kind=kind,description='用'*120,note='注'*1000)
+            for field,limit in (('description',120),('note',1000)):
+                for invalid in (None,0,False,[],{},'字'*(limit+1)):
+                    with self.subTest(kind=kind,field=field,value=invalid):
+                        body={**entry,field:invalid}
+                        created=self.client.post('/api/entries',json=body,
+                            headers={**self.headers,'Idempotency-Key':secrets.token_hex(16)})
+                        self.assertEqual(created.status_code,400,created.text)
+                        if kind=='expense':
+                            updated=self.client.put(f'/api/entries/{entry["id"]}',json=body,headers=self.headers)
+                            self.assertEqual(updated.status_code,400,updated.text)
+        entries=self.client.get('/api/entries').json()
+        self.assertEqual(len(entries),2)
+        self.assertTrue(all(e['description']=='用'*120 and e['note']=='注'*1000 for e in entries))
+
+    def test_idempotency_treats_missing_empty_and_whitespace_text_as_equivalent(self):
+        for kind in ('expense','income'):
+            headers={**self.headers,'Idempotency-Key':f'optional-text-{kind}-12345678'}
+            body={'kind':kind,'amount':'10','currency':'CNY','date':config.today()}
+            ids=[]
+            for empty in ({},{'description':'','note':''},{'description':' \t\n ','note':' \n\t '}):
+                response=self.client.post('/api/entries',json={**body,**empty},headers=headers)
+                self.assertEqual(response.status_code,200,response.text)
+                ids.append(response.json()['id'])
+            self.assertEqual(len(set(ids)),1)
+            self.assertEqual(len(self.client.get(f'/api/entries/{ids[0]}/events').json()),1)
+            for field in ('description','note'):
+                conflict=self.client.post('/api/entries',json={**body,field:'非空的新内容'},headers=headers)
+                self.assertEqual(conflict.status_code,409,conflict.text)
+        self.assertEqual(len(self.client.get('/api/entries').json()),2)
+
+    def test_entry_form_marks_only_description_and_note_optional(self):
+        response=self.client.get('/')
+        self.assertEqual(response.status_code,200)
+        for field,required in (('description',False),('note',False),('amount',True),('date',True)):
+            with self.subTest(field=field):
+                tag=re.search(rf'<(?:input|textarea)\b[^>]*\bname="{field}"[^>]*>',response.text)
+                self.assertIsNotNone(tag)
+                self.assertEqual(bool(re.search(r'\brequired\b',tag.group())),required)
+
     def test_simultaneous_duplicate_create(self):
         body={'kind':'expense','amount':'12.34','currency':'CNY','description':'并发支出','category':'其他支出','date':config.today()}
         def create():
@@ -389,6 +465,19 @@ class LedgerTest(unittest.TestCase):
         with patch('app.ai.parse',return_value={**draft,'amount':'-1'}):
             self.assertEqual(self.post('/ai/parse',{'text':'打车'}).status_code,400)
 
+    def test_legacy_ai_parse_accepts_empty_description_without_writing_entries(self):
+        for kind in ('expense','income'):
+            for description in ({},{'description':''}):
+                with self.subTest(kind=kind,description=description):
+                    draft={'kind':kind,'amount':'35','currency':'CNY','date':config.today(),'note':'',**description}
+                    upstream=MagicMock()
+                    upstream.__enter__.return_value.read.return_value=json.dumps({'choices':[{'message':{'content':json.dumps(draft)}}]}).encode()
+                    with patch.dict(os.environ,{'AI_API_KEY':'test-only-not-real','AI_MODEL':'test-model'}),patch('urllib.request.urlopen',return_value=upstream):
+                        response=self.post('/ai/parse',{'text':'记录35元'})
+                    self.assertEqual(response.status_code,200,response.text)
+                    self.assertEqual((response.json()['description'],response.json()['note']),('',''))
+        self.assertEqual(self.client.get('/api/entries').json(),[])
+
     def test_ai_json_parser_validates_upstream_response(self):
         draft={'kind':'expense','amount':'35','currency':'CNY','description':'打车','date':config.today(),'note':''}
         for amount,expected in [('35',200),(None,400),('-1',400)]:
@@ -428,14 +517,21 @@ class LedgerTest(unittest.TestCase):
         with db() as conn:token=conn.execute('SELECT token FROM tg_drafts').fetchone()[0]
         bot.process_update(self.callback(3,f'd:{token}:cur:USD'))
         bot.process_update(self.message(5,'49.50'))
-        bot.process_update(self.message(6,'软件订阅'))
+        with db() as conn:
+            draft=conn.execute('SELECT * FROM tg_drafts WHERE token=?',(token,)).fetchone()
+            self.assertEqual(draft['step'],'confirm')
+            self.assertEqual(json.loads(draft['payload'])['description'],'')
+        bot.process_update(self.callback(6,f'd:{token}:edit:description'))
+        bot.process_update(self.message(7,'软件订阅'))
         self.assertEqual(len(self.client.get('/api/entries').json()),0)
-        update=self.callback(7,f'd:{token}:save')
+        update=self.callback(8,f'd:{token}:save')
         bot.process_update(update);bot.process_update(update)
-        bot.process_update(self.callback(8,f'd:{token}:save'))
+        bot.process_update(self.callback(9,f'd:{token}:save'))
         entries=self.client.get('/api/entries').json()
         self.assertEqual(len(entries),1)
         self.assertEqual(entries[0]['amount'],'49.50')
+        self.assertEqual(entries[0]['description'],'软件订阅')
+        self.assertEqual(entries[0]['note'],'')
         self.assertEqual(entries[0]['source'],'telegram')
         self.assertEqual(entries[0]['status'],'pending')
         with db() as conn:
@@ -448,10 +544,19 @@ class LedgerTest(unittest.TestCase):
         with db() as conn:token=conn.execute('SELECT token FROM tg_drafts').fetchone()[0]
         bot.process_update(self.callback(3,f'd:{token}:cur:CNY'))
         bot.process_update(self.message(4,'2500'))
-        bot.process_update(self.message(5,'客户尾款'))
-        bot.process_update(self.callback(6,f'd:{token}:save'))
-        e=self.client.get('/api/entries').json()[0]
+        with db() as conn:
+            self.assertEqual(conn.execute('SELECT step FROM tg_drafts WHERE token=?',(token,)).fetchone()[0],'confirm')
+        bot.process_update(self.callback(5,f'd:{token}:edit:description'))
+        bot.process_update(self.message(6,'客户尾款'))
+        update=self.callback(7,f'd:{token}:save')
+        bot.process_update(update);bot.process_update(update)
+        bot.process_update(self.callback(8,f'd:{token}:save'))
+        entries=self.client.get('/api/entries').json()
+        self.assertEqual(len(entries),1)
+        e=entries[0]
         self.assertEqual(e['kind'],'income');self.assertEqual(e['status'],'posted')
+        self.assertEqual(e['description'],'客户尾款')
+        self.assertEqual(e['note'],'')
 
     def test_other_telegram_user_cannot_confirm_someone_elses_draft(self):
         member=self.new_member();self.link_bot()

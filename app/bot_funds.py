@@ -5,7 +5,7 @@ from decimal import Decimal
 from .db import settings
 from .domain import currency, fail, minor_amount, payment_preview, text_value, transition
 from .funds_plan import build_plan, report, snapshot
-from .bot_ui import amount_text, ask, button, draft_for, nav, new_draft, persist, say
+from .bot_ui import amount_text, ask, button, draft_for, entry_description, nav, new_draft, persist, say
 
 PAGE_SIZE = 5
 
@@ -52,7 +52,7 @@ def show(conn, chat_id, token, payload, rates, page=0):
     rows = []
     for member, entry in selected:
         label = '剩余全额可安排' if entry['fully_covered'] else '可部分报销'
-        lines.append(f'#{entry["id"]} {entry["description"][:60]}\n{member["name"][:40]} · {entry["date"]} · 剩余待报 ' +
+        lines.append(f'#{entry["id"]} {entry_description(entry)[:60]}\n{member["name"][:40]} · {entry["date"]} · 剩余待报 ' +
                      amount_text(entry['amount'], entry['currency'], conf) + f'\n建议 {fmt(entry["suggested"])} · {label}')
         rows.append([button(f'查看 #{entry["id"]}', f'e:{entry["id"]}')])
     if not projects:
@@ -108,7 +108,7 @@ def show_plan(conn, chat_id, token, plan, page=0, done=False):
     if len(plan['totals']) > 6:
         lines.append(f'另有 {len(plan["totals"])-6} 个币种，逐笔付款请翻页核对。')
     for item in items:
-        lines += [f'#{item["id"]} {item["description"][:60]}\n{item["name"][:40]} · {item["date"]}\n实际付款：' + amount_text(item['amount'], item['currency'], conf) +
+        lines += [f'#{item["id"]} {entry_description(item)[:60]}\n{item["name"][:40]} · {item["date"]}\n实际付款：' + amount_text(item['amount'], item['currency'], conf) +
                   '\n抵扣记账：' + amount_text(item['credited'], item['entry_currency'], conf) + ' · 剩余：' + amount_text(item['remaining'], item['entry_currency'], conf)]
         if item['currency'] != item['entry_currency']:
             lines.append(f'1 {item["entry_currency"]} = {item["rate"]} {item["currency"]} · {item["rate_date"]}')
