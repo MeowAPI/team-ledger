@@ -60,14 +60,14 @@ def currency(conf, code):
     return match
 
 
-def minor_amount(value, decimals):
+def minor_amount(value, decimals, *, allow_zero=False):
     value = str(value).strip()
     if not re.fullmatch(r'\d{1,12}(?:\.\d{1,4})?', value):
         fail('金额必须为正数，不支持千分位或科学计数法')
     try:
         amount = Decimal(value)
         scaled = amount * (10 ** decimals)
-        if amount <= 0 or scaled != scaled.to_integral_value() or scaled > 9_000_000_000_000:
+        if amount < 0 or (amount == 0 and not allow_zero) or scaled != scaled.to_integral_value() or scaled > 9_000_000_000_000:
             fail(f'金额超出范围或小数超过 {decimals} 位')
         return int(scaled)
     except InvalidOperation:

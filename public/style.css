@@ -66,4 +66,8 @@
 .ai-input-card .btn.wide{margin-top:14px}
 @media(max-width:700px){.ai-dialog{width:calc(100% - 14px);max-height:94vh}.ai-dialog-head{padding:17px 18px}.ai-dialog-head h2{font-size:17px}.ai-transcript{padding:16px 13px}.ai-bubble{max-width:94%;font-size:11px}.ai-compose{padding:11px 13px 14px}.ai-hint{display:none}.ai-action-card{padding:12px;gap:9px}.ai-plan-footer{padding:10px}.ai-plan-footer>span{flex-basis:100%}.ai-plan-footer .btn{flex:1}.ai-query-table{margin:0}}
 
+.plan-checkbox{width:18px;height:18px;flex:0 0 18px;accent-color:var(--green);align-self:center;cursor:pointer}
+#calculator-form [hidden]{display:none}
+#calculator-result[aria-busy=true]{opacity:.65}
+@media(max-width:700px){.plan-entry{flex-wrap:wrap}.plan-entry-main{min-width:0;flex:1}.plan-entry-suggested{padding-left:28px;flex-basis:100%}}
 .payment-progress{display:block;color:var(--green,#234b3e);font-size:12px;line-height:1.8;margin-top:8px}.payment-progress .settlement-line{font-size:11px}.badge.partial{background:#fff3df;color:#9b681c}.payment-item{padding:16px 0;border-bottom:1px solid #e6eae5;margin-bottom:16px}.payment-item>strong,.payment-item>small{display:block;margin-bottom:10px}.payment-item>small{color:#68766d;line-height:1.8}.payment-after{font-size:13px;line-height:1.8;color:#295441;padding:10px;background:#f3f7f2;border-radius:8px}#action-dialog:has(.payment-item){width:min(620px,calc(100vw - 28px))}.payment-item{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;padding:12px 0;margin-bottom:12px}.payment-item>strong,.payment-item>small,.payment-item>.payment-after{grid-column:1/-1;margin:0}.payment-item>small{line-height:1.6}.payment-item>label{margin:0 0 4px}@media(max-width:520px){.payment-item{grid-template-columns:1fr}}

@@ -3,7 +3,7 @@ import hashlib
 import json
 import time
 from decimal import Decimal, ROUND_DOWN, ROUND_CEILING, ROUND_HALF_UP
-from . import fx
+from . import fx, reimbursement_plan
 from .db import settings
 from .domain import currency, fail, make_payment_quote, minor_amount, payment_preview
 
@@ -23,7 +23,7 @@ def snapshot(conn):
     return hashlib.sha256(json.dumps([entries, payments, dividends, conf['reference_currency'], conf['currencies']], sort_keys=True).encode()).hexdigest()
 
 
-def report(conn, rates, scenario=None):
+def report(conn, rates, scenario=None, reimbursement=None):
     conf = settings(conn)
     if not rates or rates['base'] != conf['reference_currency']:
         return None
@@ -35,10 +35,10 @@ def report(conn, rates, scenario=None):
         needed.add(scenario['currency'])
     if needed - rates['rates'].keys():
         return None
-    return fx.calculate(entries, conf, rates, scenario, payments, dividends)
+    return fx.calculate(entries, conf, rates, scenario, payments, dividends, reimbursement)
 
 
-def build_plan(conn, user, rates, mode, *, payer_id=None, entry_ids=None, date_from=None, date_to=None, note=DEFAULT_NOTE):
+def build_plan(conn, user, rates, mode, *, payer_id=None, entry_ids=None, date_from=None, date_to=None, note=DEFAULT_NOTE, reimbursement=None):
     """Build a cash-limited reimbursement plan and reserve payment quotes for it.
 
     Optional filters narrow which pending expenses are considered: a single member,
@@ -49,13 +49,23 @@ def build_plan(conn, user, rates, mode, *, payer_id=None, entry_ids=None, date_f
     if not result or not result['complete'] or rates.get('stale'):
         fail('暂无完整有效汇率，请刷新资金计算后重试。')
     base = conf['reference_currency']
+    if mode not in ('settlement', 'original'):
+        fail('请选择有效的付款币种方式')
     scale = 10 ** currency(conf, base)['decimals']
     entries, payments, dividends = ledger_rows(conn)
+    choice = reimbursement_plan.normalize(entries, conf, base, reimbursement)
     def converted(e):
         return Decimal(e['amount_minor']) / (10 ** e['decimals']) * Decimal(rates['rates'][e['currency']]['rate'])
     cash = sum((converted(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'), Decimal(0)) - sum((converted(p) for p in payments + dividends), Decimal(0))
     left = max(cash, Decimal(0)).quantize(Decimal(1) / scale, rounding=ROUND_DOWN)
-    want_ids = {int(i) for i in entry_ids} if entry_ids else None
+    if choice['mode'] == 'budget':
+        left = min(left, Decimal(choice['budget']))
+    want_ids = {int(i) for i in entry_ids} if entry_ids is not None else None
+    if choice['mode'] == 'manual':
+        chosen = set(choice['entry_ids'])
+        want_ids = chosen if want_ids is None else want_ids & chosen
+    if want_ids == set() or choice['mode'] == 'budget' and Decimal(choice['budget']) == 0:
+        fail('本次未安排任何报销，请先设置报销预算或选择项目。')
     items, totals, cost = [], {}, Decimal(0)
     pending = sorted((e for e in entries if e['status'] == 'pending'), key=lambda e: (e['date'], e['id']))
     for e in pending:
@@ -103,4 +113,4 @@ def build_plan(conn, user, rates, mode, *, payer_id=None, entry_ids=None, date_f
     if not items:
         fail('实际已入账资金不足以安排可登记的付款。请先记录真实进账，或到单笔账目手动登记。')
     return {'items': items, 'totals': totals, 'base': base, 'cost': str(cost), 'cash': str(cash), 'left': str(cash-cost),
-            'mode': mode, 'snapshot': snapshot(conn), 'expires': int(time.time()) + 1800, 'note': note}
+            'mode': mode, 'reimbursement': choice, 'snapshot': snapshot(conn), 'expires': int(time.time()) + 1800, 'note': note}

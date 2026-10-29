@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from .db import db, settings
 from .domain import currency, fail, minor_amount
 from .config import today
+from . import reimbursement_plan
 
 
 def fetch_rates(base, codes):
@@ -82,7 +83,7 @@ def rates_for(base, codes, force=False):
     return result
 
 
-def calculate(entries, conf, fx, scenario=None, payments=None, dividends=None):
+def calculate(entries, conf, fx, scenario=None, payments=None, dividends=None, reimbursement=None):
     base = fx['base']
     base_decimals = currency(conf, base)['decimals']
     quantum = Decimal(1).scaleb(-base_decimals)
@@ -103,7 +104,8 @@ def calculate(entries, conf, fx, scenario=None, payments=None, dividends=None):
     for dividend in dividends:
         code = dividend['currency']
         dividend_balances[code] = str(Decimal(dividend_balances.get(code, '0')) + Decimal(dividend['amount_minor']) / (10 ** dividend['decimals']))
-    common = {'dividend_balances': dividend_balances, 'base': base, 'fx': fx, 'balances': {k: str(v) for k, v in balances.items()},
+    choice = reimbursement_plan.normalize(entries, conf, base, reimbursement)
+    common = {'reimbursement': choice, 'dividend_balances': dividend_balances, 'base': base, 'fx': fx, 'balances': {k: str(v) for k, v in balances.items()},
               'complete': not fx['missing'], 'scenario': scenario, 'members': []}
     if fx['missing']:
         return common
@@ -118,25 +120,30 @@ def calculate(entries, conf, fx, scenario=None, payments=None, dividends=None):
         cur = currency(conf, scenario['currency'])
         units = minor_amount(scenario['amount'], cur['decimals'])
         extra = Decimal(units) / (10 ** cur['decimals']) * Decimal(fx['rates'][cur['code']]['rate'])
-    cash = income - paid - dividend_paid + extra
+    actual_cash = income - paid - dividend_paid
+    cash = actual_cash + extra
     available = max(cash, Decimal(0))
-    reserve = min(available, due)
+    selected_ids = set(choice['entry_ids']) if choice['mode'] == 'manual' else {e['id'] for e in due_entries}
+    selected_due = sum((convert(e, e['amount_minor'] - e['reimbursed_minor']) for e in due_entries if e['id'] in selected_ids), Decimal(0))
+    reserve = reimbursement_plan.limit(choice, available, selected_due)
     payable = reserve
     groups = {}
     left = payable
-    # Every pending reimbursement is eligible, in expense-date order.
+    # Unselected projects stay visible and outstanding, with no allocation.
     for entry in due_entries:
         key = entry['payer_id']
         if key not in groups:
             groups[key] = {'id': key, 'name': entry['payer_name'], 'due': Decimal(0), 'suggested': Decimal(0), 'entries': []}
         amount = convert(entry, entry['amount_minor'] - entry['reimbursed_minor'])
         groups[key]['due'] += amount
-        portion = min(left, amount)
+        selected = entry['id'] in selected_ids
+        portion = min(left, amount) if selected else Decimal(0)
         groups[key]['suggested'] += portion
         left -= portion
         original = Decimal(entry['amount_minor'] - entry['reimbursed_minor']) / (10 ** entry['decimals'])
         groups[key]['entries'].append({
             'id': entry['id'],
+            'selected': selected,
             'description': entry['description'],
             'date': entry['date'],
             'currency': entry['currency'],
@@ -148,13 +155,14 @@ def calculate(entries, conf, fx, scenario=None, payments=None, dividends=None):
             'fully_covered': portion >= amount,
         })
     common.update({k: formatted(v) for k, v in dict(income=income, today_income=today_income, paid=paid, dividend_paid=dividend_paid,
-                   dividend_available=max(cash-due, Decimal(0)), cash=cash, due=due,
-                   reserve=reserve, payable=payable, remaining=cash-reserve, shortage=max(due-available, Decimal(0)), extra=extra).items()})
+                   dividend_available=max(actual_cash, Decimal(0)), actual_cash=actual_cash, cash=cash, due=due, selected_due=selected_due,
+                   reserve=reserve, payable=payable, remaining=cash-reserve, unplanned=due-reserve,
+                   shortage=max(due-available, Decimal(0)), extra=extra).items()})
     common['members'] = [{**g, **{k: formatted(g[k]) for k in ('due', 'suggested')}} for g in groups.values()]
     return common
 
 
-def report(base=None, scenario=None, force=False):
+def report(base=None, scenario=None, force=False, reimbursement=None):
     with db() as conn:
         conf = settings(conn)
         base = base or conf['reference_currency']
@@ -170,4 +178,6 @@ def report(base=None, scenario=None, force=False):
         currency(conf, scenario['currency'])
         minor_amount(scenario['amount'], currency(conf, scenario['currency'])['decimals'])
         codes.add(scenario['currency'])
-    return calculate(entries, conf, rates_for(base, codes, force), scenario, payments, dividends)
+    # Reject invalid choices before requesting external exchange rates.
+    reimbursement = reimbursement_plan.normalize(entries, conf, base, reimbursement)
+    return calculate(entries, conf, rates_for(base, codes, force), scenario, payments, dividends, reimbursement)

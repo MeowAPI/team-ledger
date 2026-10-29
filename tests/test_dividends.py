@@ -53,35 +53,49 @@ class DividendTest(unittest.TestCase):
         self.link_bot();self.click(2,'dividends')
         return self.draft()['token']
 
-    def test_partial_and_full_dividends_use_net_surplus_not_income(self):
+    def test_partial_and_full_dividends_use_actual_cash_with_reimbursements_due(self):
         before=self.seed_surplus()
         before_views=self.client.get('/api/entries').json()
         quote=self.quote()
-        self.assertEqual(quote['maximum_amount'],'500.00')
+        self.assertEqual(quote['maximum_amount'],'600.00')
         response=self.record(quote,'200')
         self.assertEqual(response.status_code,200,response.text)
         r=self.client.get('/api/report').json()
         self.assertEqual((r['income'],r['paid'],r['dividend_paid'],r['cash'],r['due'],r['dividend_available']),
-            ('1000.00','400.00','200.00','400.00','100.00','300.00'))
+            ('1000.00','400.00','200.00','400.00','100.00','400.00'))
         after=self.client.get('/api/entries').json()
         self.assertEqual({e['id']:e for e in after},{e['id']:e for e in before_views})
         self.assertEqual(self.record(self.quote()).status_code,200)
         r=self.client.get('/api/report').json()
-        self.assertEqual((r['cash'],r['due'],r['dividend_available']),('100.00','100.00','0.00'))
-        self.assertEqual(self.action(before[2],'pay','预留款报销').status_code,200)
+        self.assertEqual((r['cash'],r['due'],r['dividend_available']),('0.00','100.00','0.00'))
+        self.entry(kind='income',amount='100')
+        self.assertEqual(self.action(before[2],'pay','新增资金报销').status_code,200)
         self.assertEqual(self.client.get('/api/report').json()['cash'],'0.00')
 
     def test_no_surplus_and_simulation_cannot_create_dividends(self):
-        self.entry(kind='income',amount='5');self.entry(amount='10')
+        self.entry(amount='10')
         self.assertEqual(self.quote()['maximum_amount'],'0.00')
         self.assertEqual(self.record(self.quote()).status_code,400)
         self.post('/calculate',{'amount':'1000','currency':'CNY'})
         self.assertEqual(self.quote()['maximum_amount'],'0.00')
         self.assertEqual(self.client.get('/api/dividends').json(),[])
 
+    def test_dividends_allowed_when_cash_does_not_cover_outstanding_reimbursements(self):
+        self.entry(kind='income',amount='5')
+        pending=self.entry(amount='10')
+        before=self.client.get('/api/entries').json()
+        self.assertEqual(self.quote()['maximum_amount'],'5.00')
+        self.assertEqual(self.record(self.quote(),'3').status_code,200)
+        report=self.client.get('/api/report').json()
+        self.assertEqual((report['cash'],report['due'],report['dividend_available'],report['shortage']),
+                         ('2.00','10.00','2.00','8.00'))
+        self.assertEqual(self.client.get('/api/entries').json(),before)
+        self.assertEqual(self.record(self.quote(),'2.01').status_code,400)
+        self.assertEqual(pending['status'],'pending')
+
     def test_zero_negative_overpayment_and_extra_decimals_rejected(self):
         self.seed_surplus();q=self.quote()
-        for amount in ('0','-1','501','200.001','NaN','1e2',{'bad':'value'}):
+        for amount in ('0','-1','601','200.001','NaN','1e2',{'bad':'value'}):
             self.assertEqual(self.record(q,amount).status_code,400,amount)
         self.assertEqual(self.client.get('/api/dividends').json(),[])
 
@@ -89,12 +103,12 @@ class DividendTest(unittest.TestCase):
         self.entry(kind='income',amount='100',currency='USD')
         expense=self.entry(amount='20',currency='USD');self.action(expense,'pay','已付')
         self.entry(amount='10',currency='USD')
-        q=self.quote('USD');self.assertEqual(q['maximum_amount'],'70.00')
+        q=self.quote('USD');self.assertEqual(q['maximum_amount'],'80.00')
         self.assertEqual(self.record(q,'25').status_code,200)
         r=self.client.get('/api/report').json()
-        self.assertEqual((r['cash'],r['dividend_available']),('385.00','315.00'))
+        self.assertEqual((r['cash'],r['dividend_available']),('385.00','385.00'))
         self.assertEqual(r['balances'],{'USD':'55'})
-        self.assertEqual(self.quote('CNY')['maximum_amount'],'315.00')
+        self.assertEqual(self.quote('CNY')['maximum_amount'],'385.00')
         self.assertEqual(self.record(self.quote('CNY')).status_code,200)
         rows=self.client.get('/api/dividends').json()
         self.assertEqual([d['currency'] for d in rows],['CNY','USD'])
@@ -162,6 +176,14 @@ class DividendTest(unittest.TestCase):
             self.assertEqual(self.post('/dividends/quote',{'currency':[]}).status_code,400)
         self.assertEqual(self.client.get('/api/dividends').json(),[])
 
+    def test_pending_expense_currency_does_not_block_cash_only_dividend(self):
+        self.entry(kind='income', amount='100')
+        self.entry(amount='20', currency='USD')
+        with patch('app.fx.fetch_rates', side_effect=AssertionError('Pending expenses do not affect cash')):
+            q = self.quote('CNY')
+            self.assertEqual(q['maximum_amount'], '100.00')
+            self.assertEqual(self.record(q, '30').status_code, 200)
+
     def test_legacy_income_rule_removed_and_migrated_once_without_double_deduction(self):
         e=self.entry(kind='income',amount='100')
         with db(write=True) as conn:
@@ -187,7 +209,7 @@ class DividendTest(unittest.TestCase):
 
     def test_bot_partial_then_all_confirm_and_replay(self):
         self.seed_surplus();token=self.open_bot()
-        self.assertIn('¥500.00 CNY',self.last_message()['text'])
+        self.assertIn('¥600.00 CNY',self.last_message()['text'])
         self.click(3,f'v:{token}:amount');bot.process_update(self.message(4,'200'))
         self.assertIn('¥200.00 CNY',self.last_message()['text'])
         self.assertEqual(self.client.get('/api/dividends').json(),[])
@@ -196,10 +218,10 @@ class DividendTest(unittest.TestCase):
             self.click(7,f'v:{token}:commit');self.click(8,f'v:{token}:commit')
         self.assertEqual(len(self.client.get('/api/dividends').json()),1)
         self.click(9,'dividends');token=self.draft()['token']
-        self.click(10,f'v:{token}:all');self.assertIn('¥300.00 CNY',self.last_message()['text'])
+        self.click(10,f'v:{token}:all');self.assertIn('¥400.00 CNY',self.last_message()['text'])
         self.click(11,f'v:{token}:commit')
         r=self.client.get('/api/report').json()
-        self.assertEqual((r['dividend_paid'],r['cash'],r['due']),('500.00','100.00','100.00'))
+        self.assertEqual((r['dividend_paid'],r['cash'],r['due']),('600.00','0.00','100.00'))
         self.assertEqual(len(self.client.get('/api/entries').json()),3)
 
     def test_bot_currency_choice_cross_currency_and_history(self):
@@ -258,7 +280,7 @@ class DividendTest(unittest.TestCase):
             with self.assertRaises(HTTPException) as error:ai.parse('盈余已分红100',conf)
         self.assertIn('盈余分红',str(error.exception.detail))
 
-    def test_concurrent_dividends_preserve_the_reimbursement_reserve(self):
+    def test_concurrent_dividends_cannot_spend_the_same_available_cash(self):
         from concurrent.futures import ThreadPoolExecutor
         self.seed_surplus();quotes=[self.quote(),self.quote()]
         def pay(q):
@@ -272,7 +294,7 @@ class DividendTest(unittest.TestCase):
             results=list(pool.map(pay,quotes))
         self.assertEqual(sorted(results),['saved','stale'])
         r=self.client.get('/api/report').json()
-        self.assertEqual((r['cash'],r['due'],r['dividend_available']),('200.00','100.00','100.00'))
+        self.assertEqual((r['cash'],r['due'],r['dividend_available']),('200.00','100.00','200.00'))
 
     def test_retired_telegram_income_actions_cannot_recreate_the_old_rule(self):
         self.entry(kind='income',amount='100');self.link_bot()

@@ -429,14 +429,18 @@ def _resolve_batch(conn, user, conf, action, rates, context_ids):
     except PlanQuestion as exc:
         card['errors'].append(str(exc))
         date_from = date_to = None
-    entry_ids, id_warnings = [], []
+    entry_ids, id_warnings = None, []
+    if action.get('ids') is not None:
+        entry_ids = []
+        if not isinstance(action['ids'], list):
+            card['errors'].append('账目编号列表格式不正确')
     if isinstance(action.get('ids'), list):
         for value in action['ids']:
-            try:
-                entry_ids.append(int(value))
-            except (TypeError, ValueError):
+            if type(value) is not int or value <= 0:
                 card['errors'].append('账目编号无效')
-    for entry_id in entry_ids:
+            else:
+                entry_ids.append(value)
+    for entry_id in entry_ids or []:
         try:
             entry = entry_view(conn, entry_id)
         except HTTPException:
@@ -451,16 +455,18 @@ def _resolve_batch(conn, user, conf, action, rates, context_ids):
         card['errors'].append(str(exc))
         note = '通过 AI 助手批量登记付款'
     plan = None
+    reimbursement = {'mode': 'budget', 'budget': action['budget']} if action.get('budget') is not None else None
     if not card['errors']:
         try:
             plan = build_funds_plan(conn, user, rates, mode, payer_id=payer_id,
-                                    entry_ids=entry_ids or None, date_from=date_from, date_to=date_to, note=note)
+                                    entry_ids=entry_ids, date_from=date_from, date_to=date_to, note=note, reimbursement=reimbursement)
         except HTTPException as exc:
             _error(card, exc)
     if plan:
         totals = ' / '.join(_money(value, code, conf) for code, value in list(plan['totals'].items())[:6])
         card['resolved'] = {'mode': mode, 'payer_id': payer_id, 'payer_name': payer_name, 'entry_ids': entry_ids,
                             'date_from': date_from, 'date_to': date_to, 'note': note,
+                            'budget': (plan.get('reimbursement') or {}).get('budget'), 'base': plan['base'],
                             'snapshot': plan['snapshot'], 'expires': plan['expires'],
                             'items': plan['items'], 'totals': plan['totals'],
                             'cost': plan['cost'], 'left': plan['left']}
@@ -505,7 +511,7 @@ def _resolve_dividend(conn, user, conf, action, rates):
                             'surplus': quote['surplus'], 'remaining_surplus': preview['remaining_surplus']}
         card['summary'] = (f'盈余分红 · 本次 {_money(preview["amount"], code, conf)}'
                            f' · 可分红上限 {_money(quote["maximum_amount"], code, conf)}')
-        card['warnings'].append('分红会减少团队可用资金；系统只登记已完成的转账，不会发起付款。')
+        card['warnings'].append('待报销款不强制预留，分红会减少后续可报销资金；系统只登记已完成的转账，不会发起付款。')
     else:
         card['resolved'] = {'amount': 'all' if amount == 'all' else (amount or ''),
                             'currency': code, 'note': note}
@@ -794,7 +800,7 @@ def resolve(conn, user, conf, raw, context, rates=None):
                         _append(actions, _resolve_transition(conn, user, conf, single, context_ids))
                     seen_write = True
             elif action_type == 'distribute_income':
-                questions.append('按收入标记分红的规则已移除。请改说「登记盈余分红」，系统会先扣除已报销并预留待报销。')
+                questions.append('按收入标记分红的规则已移除。请改说「登记盈余分红」，系统会以扣除已报销和历史分红后的真实余额为限，允许待报销未结清时分红。')
             elif action_type == 'dividend':
                 if seen_write:
                     questions.append('盈余分红需要基于最新账本。请先确认前面的操作，再单独登记分红。')

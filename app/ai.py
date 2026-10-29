@@ -30,6 +30,7 @@ ACTION_PROPERTIES = {
     'income_distributed': {'type': ['boolean', 'null']}, 'payer': {'type': ['string', 'integer', 'null']},
     'member': {'type': ['string', 'integer', 'null']},
     'settlement_currency': {'type': ['string', 'null']},
+    'budget': {'type': ['string', 'number', 'null']},
     'query': {'type': ['string', 'null'], 'enum': ['list_entries', 'entry_detail', 'summary', 'balance',
                                                      'due', 'funds', 'simulate_income', 'dividends', None]},
     'scope': {'type': ['string', 'null'], 'enum': ['mine', 'team', 'recent', 'all', None]},
@@ -146,7 +147,7 @@ def _legacy_draft(result, conf):
     if result.get('amount') is None:
         fail('没有识别到唯一明确的金额，请一次描述一笔账，例如：今天打车花了 35 元。')
     if result.get('kind') == 'dividend':
-        fail('分红请到 Web「盈余分红」或机器人 /dividends，系统会先核对报销后的真实盈余。')
+        fail('分红请到 Web「盈余分红」或机器人 /dividends，系统会核对真实可用余额，待报销未结清也可分红。')
     if result.get('kind') not in ('income', 'expense'):
         fail('未识别出支出或收入，请补充说明')
     cur = currency(conf, result.get('currency'))
@@ -212,9 +213,9 @@ def _plan_prompt(conf, context):
 新增账目的 description 和 note 均选填；用户未提供时省略或留空字符串，不追问或编造。
 - void_entry：作废。id 或 ids；note 为原因。
 - submit_entry：把草稿记入账本。id 或 ids。
-- dividend：登记一笔已经实际完成的盈余分红（不是把某笔收入标记为已分红）。amount 省略表示全部可分红盈余，currency 省略用团队结算币种，note 为说明/转账参考号。系统会先扣除已报销、历史分红，并预留全部待报销，只允许在真实盈余内登记。
+- dividend：登记一笔已经实际完成的盈余分红（不是把某笔收入标记为已分红）。amount 省略表示全部可分红盈余，currency 省略用团队结算币种，note 为说明/转账参考号。系统会扣除已报销和历史分红，只允许在真实可用余额内登记；待报销未结清也可分红，不强制预留，分红会减少后续可报销资金。
 - pay_entry：登记一笔已经实际完成的报销转账（不是发起转账）。id、amount(本次实际付款，省略表示剩余全额)、settlement_currency(original 或币种代码)、note(付款方式/参考号)。
-- batch_pay：按团队当前可用资金批量登记已完成的报销。settlement_currency(original 或币种代码)；可选 member(只报某成员)、date_from/date_to(只报该日期范围)、ids、note。
+- batch_pay：按团队当前可用资金批量登记已完成的报销。settlement_currency(original 或币种代码)；可选 member(只报某成员)、date_from/date_to(只报该日期范围)、ids(仅报这些项目，空列表不报任何项目)、budget(本次报销总预算，以团队结算币种填写)、note。预算与项目可组合，均不会超过真实余额。
 - delete_entry：永久删除已作废账目（连同操作记录、付款记录和凭证，无法恢复）。id 或 ids。只有用户明确说“永久删除/彻底删掉”时才使用；如果只是说“删掉/作废”，优先用 void_entry。
 - query：只读查询，不需要确认。query 为 list_entries/entry_detail/summary/balance/due/funds/simulate_income/dividends；entry_detail 用 id 指定账目；dividends 查分红记录，可带 date_from/date_to；其它查询可带 scope(mine/team/recent/all)、filter_kind(expense/income)、filter_status(draft/pending/partial/reimbursed/posted/voided)、filter_currency、filter_payer、text、date_from、date_to、base、simulate_amount、simulate_currency、limit。
 

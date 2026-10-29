@@ -19,9 +19,9 @@ def home(conn, user, chat_id, token, payload, rates):
     quoted = dividends.quote(conn, user, code, rates)
     payload['_quote'] = quoted
     persist(conn, token, payload, 'dividend_home')
-    text = ('💰 报销后的盈余分红\n\n可分红盈余：' + amount_text(quoted['surplus'], quoted['reference_currency'], conf) +
+    text = ('💰 团队资金分红\n\n可分红盈余：' + amount_text(quoted['surplus'], quoted['reference_currency'], conf) +
             '\n本次按 ' + code + ' 分红，最多：' + amount_text(quoted['maximum_amount'], code, conf) +
-            '\n\n可分红 = 收入 − 已报销 − 已分红 − 仍待报销（最低为 0）。\n模拟进账不参与分红。收入和报销记录正常保留；实际完成转账后再登记。')
+            '\n\n可分红 = 收入 − 已报销 − 已分红（最低为 0）。待报销未结清也可分红。\n模拟进账不参与分红。收入和报销记录正常保留；实际完成转账后再登记。')
     rows = [[button('填写本次已分红金额', f'v:{token}:amount'), button('全部可分红盈余', f'v:{token}:all')],
             [button('选择分红币种 · ' + code, f'v:{token}:currencies:0')],
             [button('分红记录', f'v:{token}:history:0'), button('刷新盈余', 'dividends')],
@@ -41,7 +41,7 @@ def show_preview(conn, user, chat_id, token, payload):
     persist(conn, token, payload, 'dividend_confirm')
     text = ('💰 确认本次已完成的盈余分红\n\n本次实际分红：' + amount_text(value['amount'], value['currency'], conf) +
             '\n登记后可分红盈余参考：' + amount_text(value['remaining_surplus'], value['reference_currency'], conf) +
-            '\n说明：' + payload.get('note', '盈余分红') + '\n\n已预留全部待报销款项。确认后只扣减本次分红，收入、报销记录保持原样。系统不会执行转账。')
+            '\n说明：' + payload.get('note', '盈余分红') + '\n\n待报销款不强制预留，分红会减少后续可报销资金。确认后只扣减本次分红，未结清的报销继续保留。系统不会执行转账。')
     if value['currency'] != value['reference_currency']:
         text += f'\n参考汇率：1 {value["currency"]} = {value["rate"]} {value["reference_currency"]} · {value["rate_date"]}'
     say(conn, chat_id, text,
@@ -79,7 +79,7 @@ def currencies(conn, chat_id, token, page):
         paging.append(button('← 上一页', f'v:{token}:currencies:{page-1}'))
     if page+1 < pages:
         paging.append(button('下一页 →', f'v:{token}:currencies:{page+1}'))
-    say(conn, chat_id, '选择本次实际分红的币种。\n系统将报销后盈余折算为此币种，确认前请核对实际转账金额。',
+    say(conn, chat_id, '选择本次实际分红的币种。\n系统将实际可用余额折算为此币种，确认前请核对实际转账金额。',
         rows + ([paging] if paging else []) + [[button('返回盈余分红', 'dividends')]], edit=True)
 
 

@@ -222,3 +222,81 @@ class FundsTest(unittest.TestCase):
         self.assertIn('不是你的当前计算',self.error())
         self.assertEqual(self.payment_count(),0)
         self.click(13,f'f:{token}:commit');self.assertEqual(self.payment_count(),1)
+
+    def test_budget_controls_calculation_and_actual_batch_with_replay(self):
+        self.entry(kind='income', amount='100')
+        self.entry(amount='80')
+        token = self.open_funds()
+        self.click(3, f'f:{token}:budget')
+        bot.process_update(self.message(4, '25'))
+        self.assertIn('本次安排报销：¥25.00 CNY', self.last_message()['text'])
+        plan = self.prepare(token)
+        self.assertEqual(plan['totals'], {'CNY': '25.00'})
+        self.click(12, f'f:{token}:commit')
+        self.click(13, f'f:{token}:commit')
+        self.assertEqual(self.payment_count(), 1)
+        report = self.client.get('/api/report').json()
+        self.assertEqual((report['cash'], report['due']), ('75.00', '55.00'))
+
+    def test_manual_projects_do_not_pay_unselected_older_entries(self):
+        self.entry(kind='income', amount='100')
+        first = self.entry(amount='70', date='2026-10-01')
+        second = self.entry(amount='80', date='2026-10-02')
+        token = self.open_funds()
+        self.click(3, f'f:{token}:pick:0')
+        self.click(4, f'f:{token}:select:{second["id"]}:0')
+        self.click(5, f'f:{token}:view:0')
+        plan = self.prepare(token)
+        self.assertEqual([e['id'] for e in plan['items']], [second['id']])
+        self.click(12, f'f:{token}:commit')
+        entries = {e['id']: e for e in self.client.get('/api/entries').json()}
+        self.assertEqual(entries[first['id']]['remaining_amount'], '70.00')
+        self.assertEqual(entries[second['id']]['status'], 'reimbursed')
+
+    def test_empty_manual_selection_and_zero_budget_cannot_create_payments(self):
+        self.entry(kind='income', amount='100')
+        self.entry(amount='20')
+        token = self.open_funds()
+        self.click(3, f'f:{token}:pick:0')
+        self.click(4, f'f:{token}:view:0')
+        self.assertIsNone(self.prepare(token))
+        self.click(12, f'f:{token}:view:0')
+        self.click(13, f'f:{token}:budget')
+        bot.process_update(self.message(14, '0'))
+        self.assertIn('本次安排报销：¥0.00 CNY', self.last_message()['text'])
+        self.assertIsNone(self.prepare(token, start=20))
+        self.assertEqual(self.payment_count(), 0)
+        self.click(22, f'f:{token}:auto')
+        self.assertIn('本次安排报销：¥20.00 CNY', self.last_message()['text'])
+
+    def test_budget_input_does_not_change_currency_after_settings_change(self):
+        self.entry(kind='income', amount='100')
+        self.entry(amount='20')
+        token = self.open_funds()
+        self.click(3, f'f:{token}:budget')
+        with db(write=True) as conn:
+            set_setting(conn, 'reference_currency', 'HKD')
+        bot.process_update(self.message(4, '10'))
+        self.assertEqual(self.draft()['step'], 'funds_budget')
+        self.assertNotIn('reimbursement', json.loads(self.draft()['payload']))
+        self.assertEqual(self.payment_count(), 0)
+
+    def test_group_budget_requires_reply_and_project_selection_is_paginated(self):
+        self.entry(kind='income', amount='100')
+        for _ in range(6):
+            self.entry(amount='10')
+        self.open_funds()
+        self.allow_group()
+        self.click(3, 'funds', chat=-555, private=False)
+        token = self.draft()['token']
+        self.click(4, f'f:{token}:budget', chat=-555, private=False)
+        self.flush_prompts()
+        bot.process_update(self.message(5, '25', chat=-555, private=False))
+        self.assertEqual(self.draft()['step'], 'funds_budget')
+        reply = self.message(6, '25', chat=-555, private=False)
+        reply['message']['reply_to_message'] = {'message_id': 600}
+        bot.process_update(reply)
+        self.assertEqual(self.draft()['step'], 'funds_view')
+        self.click(7, f'f:{token}:pick:1', chat=-555, private=False)
+        self.assertIn('第 2/2 页', self.last_message()['text'])
+        self.assertEqual(self.payment_count(), 0)

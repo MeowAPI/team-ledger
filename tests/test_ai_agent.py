@@ -182,8 +182,9 @@ class AiAgentTest(unittest.TestCase):
         response = self.execute(plan)
         self.assertEqual(response.status_code, 200, response.text)
         report = self.client.get('/api/report').json()
-        self.assertEqual(report['dividend_paid'], '400.00')
-        self.assertEqual(report['cash'], '100.00')
+        self.assertEqual(report['dividend_paid'], '500.00')
+        self.assertEqual(report['cash'], '0.00')
+        self.assertEqual(report['due'], '100.00')
         self.assertEqual(report['dividend_available'], '0.00')
 
     def test_dividend_after_prior_write_is_split_into_a_question(self):
@@ -195,6 +196,26 @@ class AiAgentTest(unittest.TestCase):
         ])
         self.assertEqual([card['type'] for card in plan['actions']], ['create_entry'])
         self.assertTrue(any('盈余分红需要基于最新账本' in question for question in plan['questions']))
+
+    def test_batch_budget_and_project_filter_apply_together(self):
+        self.entry(kind='income', amount='100')
+        first = self.entry(amount='70', date='2026-10-01')
+        second = self.entry(amount='80', date='2026-10-02')
+        plan = self.plan([{'type': 'batch_pay', 'ids': [second['id']], 'budget': '30'}])
+        self.assertFalse(plan['actions'][0]['errors'], plan)
+        self.assertEqual(plan['actions'][0]['resolved']['items'][0]['id'], second['id'])
+        self.assertEqual(plan['actions'][0]['resolved']['items'][0]['amount'], '30.00')
+        self.assertEqual(self.execute(plan).status_code, 200)
+        rows = {e['id']: e for e in self.entries()}
+        self.assertEqual(rows[first['id']]['reimbursed_amount'], '0.00')
+        self.assertEqual(rows[second['id']]['reimbursed_amount'], '30.00')
+
+    def test_batch_empty_project_list_never_falls_back_to_all_expenses(self):
+        self.entry(kind='income', amount='100')
+        self.entry(amount='10')
+        plan = self.plan([{'type': 'batch_pay', 'ids': []}])
+        self.assertTrue(plan['actions'][0]['errors'])
+        self.assertEqual(self.client.get('/api/report').json()['paid'], '0.00')
 
     def test_dividend_query_returns_history_and_totals(self):
         self.entry(kind='income', amount='100', description='收入')

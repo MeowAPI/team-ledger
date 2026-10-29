@@ -1,4 +1,4 @@
-"""Distribute only real surplus after protecting outstanding reimbursements."""
+"""Record dividends within real available cash, even with reimbursements due."""
 import hashlib
 import json
 import secrets
@@ -24,7 +24,7 @@ def fingerprint(conn):
 
 
 def needed_codes(conn):
-    return {r[0] for r in conn.execute("SELECT currency FROM entries WHERE status IN ('posted','pending','reimbursed') UNION SELECT currency FROM payments UNION SELECT currency FROM dividends")}
+    return {r[0] for r in conn.execute("SELECT currency FROM entries WHERE kind='income' AND status='posted' UNION SELECT currency FROM payments UNION SELECT currency FROM dividends")}
 
 
 def quote(conn, user, code, rates):
@@ -42,8 +42,7 @@ def quote(conn, user, code, rates):
     income = sum((value(e) for e in entries if e['kind'] == 'income' and e['status'] == 'posted'), Decimal(0))
     paid = sum((value(p) for p in payments), Decimal(0))
     distributed = sum((value(d) for d in dividends), Decimal(0))
-    due = sum((value(e, e['amount_minor'] - e['reimbursed_minor']) for e in entries if e['status'] == 'pending'), Decimal(0))
-    surplus = max(income - paid - distributed - due, Decimal(0))
+    surplus = max(income - paid - distributed, Decimal(0))
     rate = rates['rates'][code]
     maximum = int((surplus / Decimal(rate['rate']) * (10 ** cur['decimals'])).to_integral_value(rounding=ROUND_DOWN))
     token, expires = secrets.token_urlsafe(24), int(time.time()) + 1800
@@ -73,10 +72,10 @@ def preview(conn, user, quote_id, amount):
     if quoted['fingerprint'] != fingerprint(conn):
         fail('账本或报销金额已变化，请重新核对可分红盈余，尚未登记分红', 409)
     if quoted['maximum_minor'] <= 0:
-        fail('当前没有可分红盈余，请先覆盖待报销款项')
+        fail('当前没有可用于分红的实际可用资金')
     units = quoted['maximum_minor'] if amount == 'all' else minor_amount(amount, quoted['decimals'])
     if units > quoted['maximum_minor']:
-        fail('本次分红不能超过扣除已报销、历史分红并预留待报销后的盈余')
+        fail('本次分红不能超过扣除已报销和历史分红后的实际可用资金')
     actual = Decimal(units) / (10 ** quoted['decimals'])
     return {**view_quote(conn, user, quote_id), 'amount': format(actual, f'.{quoted["decimals"]}f'),
             'amount_minor': units, 'remaining_surplus': str(Decimal(quoted['surplus']) - actual * Decimal(quoted['rate']))}

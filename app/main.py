@@ -431,7 +431,9 @@ def get_report(request: Request, base: str | None = None):
 @app.post('/api/calculate')
 def calculate(body: dict, request: Request):
     current(request)
-    return fx.report(body.get('base'), {'amount': body.get('amount', ''), 'currency': body.get('currency')})
+    amount = body.get('amount', '')
+    scenario = None if amount in ('', None) else {'amount': amount, 'currency': body.get('currency')}
+    return fx.report(body.get('base'), scenario, reimbursement=body.get('reimbursement'))
 
 
 @app.post('/api/fx/refresh')

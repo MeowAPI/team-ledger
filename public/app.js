@@ -33,6 +33,7 @@ const ROLES = {owner:'团队成员 · 共同管理',finance:'团队成员 · 共
 const COLORS = ['green','orange','blue','purple'];
 const state = {user:null,csrf:'',conf:null,members:[],entries:[],integrations:{},dividends:[],dividend:null,report:null,page:'overview',
   filter:{text:'',kind:'all',currency:'all',payer:'all',status:'all',from:'',to:''},reimburseTab:'pending',selected:new Set(),entryKind:'expense',editing:null,entryKey:null,action:null,setup:false,base:null,loadId:0,
+  calculator:{mode:'auto',budget:'',budgetBase:null,ids:new Set(),amount:'',currency:null,report:null,request:0},
   ai:{busy:false,conversation:[],plan:null,selected:new Set(),error:''}};
 const canManage = () => Boolean(state.user?.active);
 const isOwner = canManage;
@@ -158,6 +159,7 @@ function aiFieldRows(action){
     add('登记后剩余',`${r.remaining_amount} ${r.entry_currency}`);add('付款备注',r.note);
   }else if(action.type==='batch_pay'){
     add('付款币种',r.mode==='settlement'?'团队结算货币':'各笔记账货币');add('限定成员',r.payer_name||(r.payer_id?`#${r.payer_id}`:''));
+    add('报销预算',r.budget!==null&&r.budget!==undefined?`${r.budget} ${r.base}`:'');
     add('日期范围',[r.date_from,r.date_to].filter(Boolean).join(' 至 '));add('付款备注',r.note);
   }else if(action.type==='delete_entry'){
     add('编号',`#${r.id}`);add('说明',entryDescription(r));
@@ -370,11 +372,12 @@ function renderReimbursements() {
     `<div class="reimbursement-summary"><div class="mini-stat"><small>全部待报销 · 参考换算</small><strong>${metric('due')}</strong></div><div class="mini-stat"><small>当前可安排报销资金</small><strong>${metric('payable')}</strong></div><div class="mini-stat"><small>累计已报销</small><strong>${metric('paid')}</strong></div></div>${reportWarning()}<section class="panel"><div class="filter-tabs">${['pending','reimbursed','draft','voided'].map(s=>`<button data-reimburse-tab="${s}" class="${state.reimburseTab===s?'active':''}">${STATUS[s]}<small>${state.entries.filter(e=>e.kind==='expense'&&e.status===s).length}</small></button>`).join('')}</div><div id="reimbursement-results">${table(rows,{checkbox:selectable})}</div>${rows.length&&selectable?`<div class="batch-toolbar" id="batch-toolbar">${batchToolbar()}</div>`:''}</section><div class="notice">每笔垫付记账后直接进入待报销。每位成员都可登记付款；请在实际转账完成后标记已报销。支持部分报销，可按记账货币或团队结算货币填写本次金额；待报销列表包含尚未结清的部分报销。</div>`;
 }
 function calcSummary(report,scenario=false) {
-  if (!report?.complete) return `<div class="calc-summary"><span class="eyebrow">REIMBURSE FIRST</span><div class="calc-amount">等待汇率</div><p>原币种账目已保留，缺少可靠汇率时暂停合并计算。</p></div>${reportWarning(report)}`;
-  const b=report.base;
-  return `<div class="calc-summary"><span class="eyebrow">${scenario?'WHAT IF · 新进账预演':'REIMBURSE FIRST · 优先覆盖待报销'}</span><div class="calc-amount">${money(report.reserve,b)}</div><p>建议预留为报销资金 · 覆盖全部待报销款项</p><div class="calculation-equation">可用资金 = 团队收入 − 已报销付款 − 已分红${scenario?' + 本次模拟进账':''}<br>预留报销 = 可用正余额与待报销总额的较小值</div><div class="calc-row"><span>${scenario?'模拟后的':'当前'}可用资金</span><strong>${money(report.cash,b)}</strong></div><div class="calc-row"><span>全部待报销</span><strong>${money(report.due,b)}</strong></div><div class="calc-row"><span>当前可安排付款</span><strong>${money(report.payable,b)}</strong></div><div class="calc-row highlight"><span>预留报销后结余</span><strong>${money(report.remaining,b)}</strong></div><div class="calc-row"><span>还需补充的资金</span><strong>${money(report.shortage,b)}</strong></div></div>`;
+  if (!report?.complete) return `<div class="calc-summary"><span class="eyebrow">PLAN YOUR FUNDS</span><div class="calc-amount">等待汇率</div><p>原币种账目已保留，缺少可靠汇率时暂停合并计算。</p></div>${reportWarning(report)}`;
+  const b=report.base,mode=report.reimbursement?.mode||'auto';
+  const label={auto:'按日期自动安排',budget:'按指定预算安排',manual:'仅安排所选项目'}[mode];
+  return `<div class="calc-summary"><span class="eyebrow">${scenario?'WHAT IF · 新进账预演':'PLAN YOUR FUNDS · 自主安排资金'}</span><div class="calc-amount">${money(report.reserve,b)}</div><p>本次安排报销 · ${label}</p><div class="calculation-equation">可用资金 = 团队收入 − 已报销付款 − 已分红${scenario?' + 本次模拟进账':''}<br>本次报销以可用资金、报销范围${mode==='budget'?'及指定预算':''}为上限</div><div class="calc-row"><span>${scenario?'模拟后的':'当前'}可用资金</span><strong>${money(report.cash,b)}</strong></div><div class="calc-row"><span>全部待报销</span><strong>${money(report.due,b)}</strong></div>${mode==='manual'?`<div class="calc-row"><span>所选项目待报销</span><strong>${money(report.selected_due,b)}</strong></div>`:''}${mode==='budget'?`<div class="calc-row"><span>本次报销预算</span><strong>${money(report.reimbursement.budget,b)}</strong></div>`:''}<div class="calc-row"><span>本次可安排付款</span><strong>${money(report.payable,b)}</strong></div><div class="calc-row highlight"><span>本次安排后结余</span><strong>${money(report.remaining,b)}</strong></div><div class="calc-row"><span>本次安排后仍待报销</span><strong>${money(report.unplanned,b)}</strong></div><div class="calc-row"><span>覆盖全部待报销的资金缺口</span><strong>${money(report.shortage,b)}</strong></div></div>`;
 }
-function planTable(report) {
+function planTable(report,selectable=false) {
   if (!report?.complete||!report.members.length) return empty('暂时没有待报销','记下成员垫付后，这里会显示每位成员的报销情况。');
   const entryLabel = entry => {
     const hasSuggestion=Number(entry.suggested)>0;
@@ -382,19 +385,43 @@ function planTable(report) {
     const status=hasSuggestion?(full?'建议付款':'部分安排'):'暂不安排';
     const original=money(entry.amount,entry.currency,false);
     const converted=entry.currency===report.base?'':` · 结算参考 ${money(entry.settlement,report.base,false)}`;
-    return `<div class="plan-entry ${hasSuggestion?'is-selected':'is-waiting'}"><div class="plan-entry-main"><span class="plan-entry-status">${status}</span><strong>${esc(entryDescription(entry))}</strong><small>${esc(entry.date)} · 剩余待报 ${original}${converted}${Number(entry.reimbursed_amount)>0?` · 原金额 ${money(entry.original_amount,entry.currency,false)} · 已报 ${money(entry.reimbursed_amount,entry.currency,false)}`:``}</small></div><div class="plan-entry-suggested">${hasSuggestion?`建议 ${money(entry.suggested,report.base,false)}`:'—'}</div></div>`;
+    return `<div class="plan-entry ${hasSuggestion?'is-selected':'is-waiting'}">${selectable?`<input class="plan-checkbox" type="checkbox" data-calc-select="${entry.id}" ${state.calculator.ids.has(entry.id)?'checked':''} aria-label="选择报销项目 #${entry.id} ${esc(entryDescription(entry))}">`:''}<div class="plan-entry-main"><span class="plan-entry-status">${status}</span><strong>${esc(entryDescription(entry))}</strong><small>#${entry.id} · ${esc(entry.date)} · 剩余待报 ${original}${converted}${Number(entry.reimbursed_amount)>0?` · 原金额 ${money(entry.original_amount,entry.currency,false)} · 已报 ${money(entry.reimbursed_amount,entry.currency,false)}`:``}</small></div><div class="plan-entry-suggested">${hasSuggestion?`建议 ${money(entry.suggested,report.base,false)}`:'—'}</div></div>`;
   };
   return `<div class="table-wrap"><table class="data-table plan-table"><thead><tr><th>成员 / 具体项目</th><th class="money">全部待报销</th><th class="money">建议安排付款</th></tr></thead><tbody>${report.members.map(m=>`<tr><td><strong>${esc(m.name)}</strong><div class="plan-entry-list">${m.entries.map(entryLabel).join('')}</div></td><td class="money">${money(m.due,report.base,false)}</td><td class="money"><strong>${money(m.suggested,report.base,false)}</strong><small class="subline">按项目明细安排</small></td></tr>`).join('')}</tbody></table></div>`;
 }
 function renderCalculator() {
-  const r=state.report;
-  return heading('这笔进账，能报多少？','先把伙伴们的垫付安排好，再看团队还剩多少。','REIMBURSE FIRST, THEN THE REST',baseSelect())+
-    dividendNotice()+`<div class="calculator-grid"><section class="panel"><div class="panel-inner"><h2>新进账，先算一算</h2><p class="calculator-intro">把本次新增收入放进当前账本，预演报销和结余。这里的输入不会自动入账，也不能用于实际分红。</p><form id="calculator-form"><div class="form-grid"><label>本次新增进账<input name="amount" inputmode="decimal" placeholder="例如：1000.00" required></label><label>收入币种<select name="currency">${currencyOptions(state.conf.default_currency)}</select></label></div><button class="btn primary wide" type="submit">${icon('calc')}计算能报多少</button><div class="form-error" id="calculator-error"></div></form><div class="notice"><strong>默认规则：优先覆盖全部待报销。</strong><p>资金不足时显示缺口；资金充足时显示预留报销后的结余。全部待报销账目均可安排付款，按最早发生日期优先安排。</p><p>支持分次报销：实际转账后，在报销管理填写本次已报销金额，可选择记账货币或团队结算货币。建议金额仅用于规划，不会自动付款。</p></div>${canManage()?'<button class="btn wide" data-new="income">＋ 把真实进账记入账本</button>':''}</div></section><section id="calculator-result">${calcSummary(r)}</section></div><section class="panel recent-panel"><div class="panel-heading"><div><h3>伙伴们的报销安排</h3><p>统一按 ${esc(r?.base||state.conf.reference_currency)} 参考换算 · 付款可选记账货币或结算货币</p></div><a class="tiny-link" href="#reimbursements">处理报销 ↗</a></div><div id="plan-table">${planTable(r)}</div></section><section class="panel recent-panel"><div class="panel-inner"><div class="page-subheading"><h3>本次换算依据</h3><button class="btn small" id="refresh-fx">刷新汇率 ↻</button></div><div id="fx-details">${rateDetails(r)}${reportWarning(r)}</div><p class="fx-caption">当前各币种资金余额：${r?Object.entries(r.balances).map(([c,a])=>`${esc(c)} ${esc(a)}`).join(' · ')||'尚无收入或报销付款':'—'}。不同币种账户之间是否实际换汇，需要团队自行确认。</p></div></section>`;
+  const c=state.calculator,r=c.report||state.report,base=r?.base||state.conf.reference_currency;
+  if(c.budgetBase&&c.budgetBase!==base)c.budget='';
+  c.budgetBase=base;
+  return heading('这笔资金，你来安排。','按预算报销，或挑选本次要报的项目，再看剩余资金。','PLAN YOUR FUNDS',baseSelect())+
+    dividendNotice()+`<div class="calculator-grid"><section class="panel"><div class="panel-inner"><h2>报多少，先算一算</h2><p class="calculator-intro">直接安排当前余额，也可加入一笔新收入预演。模拟进账不会自动入账，实际分红始终以真实余额为准。</p><form id="calculator-form"><div class="form-grid"><label>本次新增进账 <span class="optional">选填</span><input name="amount" value="${esc(c.amount)}" inputmode="decimal" placeholder="留空，使用当前余额"></label><label>收入币种<select name="currency">${currencyOptions(c.currency||state.conf.default_currency)}</select></label></div><label>本次报销方式<select name="reimbursement_mode" id="calculator-mode">${options([{id:'auto',name:'自动安排 · 最早发生优先'},{id:'budget',name:'指定报销预算'},{id:'manual',name:'手动选择报销项目'}],m=>m.id,m=>m.name,c.mode)}</select></label><label id="calculator-budget-field" ${c.mode==='budget'?'':'hidden'}>用于报销的金额 · ${esc(base)}<input name="budget" value="${esc(c.budget)}" inputmode="decimal" placeholder="例如：100.00，填 0 暂不报销" ${c.mode==='budget'?'required':''}></label><p id="calculator-selection-hint" class="notice" ${c.mode==='manual'?'':'hidden'}>在下方项目清单勾选本次要报销的项目；已选 <strong id="calculator-selection-count">${c.ids.size}</strong> 项。未选项目继续待报销。</p><button class="btn primary wide" type="submit">${icon('calc')}计算资金安排</button><div class="form-error" id="calculator-error" role="alert"></div></form><div class="notice"><strong>本次安排由你决定。</strong><p>指定预算时按日期安排，最多使用填写的金额；手动选择时只安排勾选项目。资金不足的项目可部分安排，未安排余额继续待报销。</p><p>报销尚未结清也可分红，分红会减少后续可报销资金。实际转账后请到报销管理或盈余分红登记。</p></div>${canManage()?'<button class="btn wide" data-new="income">＋ 把真实进账记入账本</button>':''}</div></section><section id="calculator-result" aria-live="polite">${calcSummary(r,Boolean(r?.scenario))}</section></div><section class="panel recent-panel"><div class="panel-heading"><div><h3>伙伴们的报销安排</h3><p>统一按 ${esc(base)} 参考换算 · 手动模式可直接勾选项目</p></div><a class="tiny-link" href="#reimbursements">处理报销 ↗</a></div><div id="plan-table">${planTable(r,c.mode==='manual')}</div></section><section class="panel recent-panel"><div class="panel-inner"><div class="page-subheading"><h3>本次换算依据</h3><button class="btn small" id="refresh-fx">刷新汇率 ↻</button></div><div id="fx-details">${rateDetails(r)}${reportWarning(r)}</div><p class="fx-caption">当前各币种资金余额：${r?Object.entries(r.balances).map(([c,a])=>`${esc(c)} ${esc(a)}`).join(' · ')||'尚无收入或报销付款':'—'}。不同币种账户之间是否实际换汇，需要团队自行确认。</p></div></section>`;
+}
+async function calculateFunds() {
+  const form=$('#calculator-form');if(!form)return;
+  const c=state.calculator,request=++c.request;
+  c.amount=form.elements.amount.value;c.currency=form.elements.currency.value;c.budget=form.elements.budget.value;
+  $('#calculator-error').textContent='';
+  $('#calculator-result').setAttribute('aria-busy','true');
+  try {
+    const data=await api('/calculate','POST',{amount:c.amount,currency:c.currency,base:state.base||state.conf.reference_currency,
+      reimbursement:{mode:c.mode,budget:c.budget,entry_ids:[...c.ids]}});
+    if(request!==c.request||!$('#calculator-form'))return;
+    c.report=data;
+    $('#calculator-result').innerHTML=calcSummary(data,Boolean(data.scenario));
+    $('#plan-table').innerHTML=planTable(data,c.mode==='manual');
+    $('#fx-details').innerHTML=rateDetails(data)+reportWarning(data);
+  }catch(e){
+    if(request!==c.request||!$('#calculator-form'))return;
+    c.report=null;
+    $('#calculator-error').textContent=e.message;
+    $('#calculator-result').innerHTML='<div class="calc-summary"><h2>请调整后重新计算</h2><p>当前输入尚未生成有效的资金安排。</p></div>';
+    $('#plan-table').innerHTML=empty('本次安排尚未计算','请检查预算或刷新项目后重新计算。');
+  }finally{if(request===c.request)$('#calculator-result')?.setAttribute('aria-busy','false');}
 }
 function renderDividends() {
   const r=state.report,base=r?.base||state.conf.reference_currency,metric=k=>r?.complete?money(r[k],base):'—';
-  return heading('报销之后，再分盈余。','收入与报销照常保留，只从报销后剩下的资金中登记分红。','SURPLUS, SHARED',baseSelect())+
-    `<div class="reimbursement-summary"><div class="mini-stat"><small>已扣除报销和分红的余额</small><strong>${metric('cash')}</strong></div><div class="mini-stat"><small>仍需预留的待报销款</small><strong>${metric('due')}</strong></div><div class="mini-stat"><small>当前可分红盈余</small><strong>${metric('dividend_available')}</strong></div></div>${reportWarning()}<section class="panel"><div class="panel-inner"><h2>登记实际完成的分红</h2><p>可分红盈余 = max（团队收入 − 已报销 − 历史分红 − 全部待报销，0）。</p><p>例如收入 1,000、已报销 400、待报销 100，可分红 500；本次分红 200 后，还剩 300 可分红。</p><div class="heading-actions"><button class="btn primary" data-dividend-open="amount">填写本次已分红金额</button><button class="btn" data-dividend-open="all">全部可分红盈余已分红</button></div><p class="fx-caption">按实际转账币种登记，每次金额增量扣减。模拟进账不参与实际分红，未结清的报销款会先预留。跨币种上限采用确认时的参考汇率，实际换汇和转账由团队自行完成。</p></div></section><section class="panel recent-panel"><div class="panel-inner"><h3>分红记录</h3><p>累计分红（原币种）：${groupedTotals(state.dividends)}</p>${state.dividends.length?`<div class="timeline">${state.dividends.map(d=>`<div class="timeline-item"><strong>D${d.id} · ${money(d.amount,d.currency)}</strong><br>${esc(d.name)} · ${esc(d.note)}${d.currency!==d.reference_currency?`<br>1 ${esc(d.currency)} = ${esc(d.fx_rate)} ${esc(d.reference_currency)} · ${esc(d.fx_date)}`:''}<small>${esc(d.created_at.replace('T',' ').slice(0,19))}</small></div>`).join('')}</div>`:'<p class="muted">尚未登记分红。</p>'}</div></section>`;
+  return heading('报销未结清，也能分红。','按实际可用余额登记分红，尚未报销的项目继续保留。','SURPLUS, SHARED',baseSelect())+
+    `<div class="reimbursement-summary"><div class="mini-stat"><small>已扣除报销和分红的余额</small><strong>${metric('cash')}</strong></div><div class="mini-stat"><small>尚未结清的待报销款</small><strong>${metric('due')}</strong></div><div class="mini-stat"><small>当前可分红盈余</small><strong>${metric('dividend_available')}</strong></div></div>${reportWarning()}<section class="panel"><div class="panel-inner"><h2>登记实际完成的分红</h2><p>可分红金额 = max（团队收入 − 已报销 − 历史分红，0）。待报销款不强制预留。</p><p>例如收入 1,000、已报销 400、待报销 800，当前仍可分红 600；本次分红 200 后，可用余额为 400，待报销仍为 800。</p><div class="heading-actions"><button class="btn primary" data-dividend-open="amount">填写本次已分红金额</button><button class="btn" data-dividend-open="all">全部可分红盈余已分红</button></div><p class="fx-caption">按实际转账币种登记，每次金额增量扣减。模拟进账不参与实际分红。分红会减少后续可报销的资金，请自行安排报销与分红比例。跨币种上限采用确认时的参考汇率，实际换汇和转账由团队自行完成。</p></div></section><section class="panel recent-panel"><div class="panel-inner"><h3>分红记录</h3><p>累计分红（原币种）：${groupedTotals(state.dividends)}</p>${state.dividends.length?`<div class="timeline">${state.dividends.map(d=>`<div class="timeline-item"><strong>D${d.id} · ${money(d.amount,d.currency)}</strong><br>${esc(d.name)} · ${esc(d.note)}${d.currency!==d.reference_currency?`<br>1 ${esc(d.currency)} = ${esc(d.fx_rate)} ${esc(d.reference_currency)} · ${esc(d.fx_date)}`:''}<small>${esc(d.created_at.replace('T',' ').slice(0,19))}</small></div>`).join('')}</div>`:'<p class="muted">尚未登记分红。</p>'}</div></section>`;
 }
 async function openDividend(mode='amount') {
   const form=$('#dividend-form');form.reset();
@@ -414,16 +441,16 @@ function dividendMode(mode) {
 async function loadDividendQuote() {
   const current=state.dividend,request=++current.loading,code=$('#dividend-currency').value;
   current.quote=null;$('#dividend-confirm').disabled=true;$('#dividend-amount').disabled=true;
-  $('#dividend-limit').textContent='正在核对真实账本、已报销和待报销金额…';$('#dividend-error').textContent='';
+  $('#dividend-limit').textContent='正在核对真实账本、已报销和历史分红…';$('#dividend-error').textContent='';
   try {
     const q=await api('/dividends/quote','POST',{currency:code});
     if(state.dividend!==current||request!==current.loading)return;
     current.quote=q;
     const input=$('#dividend-amount');input.disabled=false;input.value='';
-    $('#dividend-limit').innerHTML=`报销后可分红盈余：${money(q.surplus,q.reference_currency)}<br>本次最多：${money(q.maximum_amount,q.currency)}${q.currency!==q.reference_currency?`<br>1 ${esc(q.currency)} = ${esc(q.rate)} ${esc(q.reference_currency)} · ${esc(q.rate_date)}`:''}<br>金额为本次已转账金额，确认有效 30 分钟。`;
+    $('#dividend-limit').innerHTML=`实际可用分红金额：${money(q.surplus,q.reference_currency)}<br>本次最多：${money(q.maximum_amount,q.currency)}${q.currency!==q.reference_currency?`<br>1 ${esc(q.currency)} = ${esc(q.rate)} ${esc(q.reference_currency)} · ${esc(q.rate_date)}`:''}<br>金额为本次已转账金额，确认有效 30 分钟。`;
     dividendMode(current.mode);
     $('#dividend-confirm').disabled=Number(q.maximum_amount)<=0;
-    if(Number(q.maximum_amount)<=0)$('#dividend-error').textContent='当前没有可登记的分红盈余，请先覆盖待报销款项。';
+    if(Number(q.maximum_amount)<=0)$('#dividend-error').textContent='当前没有可用于分红的实际可用资金。';
   } catch(e) {
     if(state.dividend!==current||request!==current.loading)return;
     $('#dividend-limit').textContent='暂时不能取得有效分红上限。';$('#dividend-error').textContent=e.message;
@@ -436,7 +463,7 @@ function renderMembers() {
 function renderIntegrations() {
   const i=state.integrations;
   return heading('在哪里，都能好好记账。','Web 上管全局，Telegram 里随手记。','ONE LEDGER, TWO WAYS')+
-    `<div class="integration-grid"><section class="panel integration-card"><div class="integration-icon">${icon('send')}</div><div class="integration-title"><h2>Telegram 机器人</h2><span class="badge ${i.telegram_linked?'posted':'draft'}">${i.telegram_linked?'账号已绑定':'账号未绑定'}</span></div><p>按钮一步步记录，或发一句话让 AI 帮你填写。确认后，账目立即同步到 Web。</p><div class="integration-steps"><div class="integration-step"><span class="step-number">1</span><span>团队通过 BotFather 创建机器人，配置服务器的 TELEGRAM_BOT_TOKEN，并启动机器人进程。</span></div><div class="integration-step"><span class="step-number">2</span><span>点击下方生成 10 分钟内有效的一次性绑定码，在机器人私聊中发送 /start 绑定码。</span></div><div class="integration-step"><span class="step-number">3</span><span>发送 /book 按按钮记账；也可以说「今天订阅软件花了 20 美元」，确认预览后入账。</span></div></div><div class="notice">机器人配置：${i.bot_configured?'已配置':'尚未配置'} · 进程：${i.bot_online?'在线':'尚未检测到在线'}${i.bot_username?`<p>机器人：<a href="https://t.me/${esc(i.bot_username)}" target="_blank" rel="noreferrer">@${esc(i.bot_username)} ↗</a></p>`:''}</div><button class="btn primary" id="generate-link">${i.telegram_linked?'重新生成绑定码':'生成绑定码'}</button>${i.telegram_linked?' <button class="btn danger" id="unlink-telegram">解除绑定</button>':''}<div id="link-code-result"></div></section><section class="panel integration-card"><div class="integration-icon ai">${icon('spark')}</div><div class="integration-title"><h2>AI 自然语言记账</h2><span class="badge ${i.ai_configured?'posted':'draft'}">${i.ai_configured?'已配置':'等待配置'}</span></div><p>一次说一段话，AI 能同时新增多笔、修改、作废、登记报销、盈余分红或查询；核对操作清单后一次性入账。Web 与 Telegram 共用同一套引擎。</p><div class="code-block">昨天我垫了打车 35 元，老王垫的聚餐 240 元，\n收到客户尾款 2000 美元；\n看看现在能报多少，再把可分红盈余分掉。</div><div class="notice">AI 会读取最近约 120 笔账目的摘要来精准匹配“昨天那笔”“老王未报销的”，但不会发送凭证、密码或会话信息。写操作必须由你核对确认；付款只登记已完成的转账，盈余分红会先扣除已报销、历史分红并预留全部待报销。</div><h3>服务器配置项</h3><div class="code-block">AI_BASE_URL=你的兼容接口地址\nAI_API_KEY=你的接口密钥\nAI_MODEL=接口支持的模型名称\nAI_CONTEXT_ENTRIES=120\nAI_MAX_ACTIONS=20</div><p class="fx-caption">密钥仅存放在服务器 .env，不会展示在浏览器。尚未配置时，Web 表单和 Telegram 按钮记账仍可使用。</p><a href="#ledger" class="btn wide" data-ai-open>打开 AI 记账助手 →</a></section></div>`;
+    `<div class="integration-grid"><section class="panel integration-card"><div class="integration-icon">${icon('send')}</div><div class="integration-title"><h2>Telegram 机器人</h2><span class="badge ${i.telegram_linked?'posted':'draft'}">${i.telegram_linked?'账号已绑定':'账号未绑定'}</span></div><p>按钮一步步记录，或发一句话让 AI 帮你填写。确认后，账目立即同步到 Web。</p><div class="integration-steps"><div class="integration-step"><span class="step-number">1</span><span>团队通过 BotFather 创建机器人，配置服务器的 TELEGRAM_BOT_TOKEN，并启动机器人进程。</span></div><div class="integration-step"><span class="step-number">2</span><span>点击下方生成 10 分钟内有效的一次性绑定码，在机器人私聊中发送 /start 绑定码。</span></div><div class="integration-step"><span class="step-number">3</span><span>发送 /book 按按钮记账；也可以说「今天订阅软件花了 20 美元」，确认预览后入账。</span></div></div><div class="notice">机器人配置：${i.bot_configured?'已配置':'尚未配置'} · 进程：${i.bot_online?'在线':'尚未检测到在线'}${i.bot_username?`<p>机器人：<a href="https://t.me/${esc(i.bot_username)}" target="_blank" rel="noreferrer">@${esc(i.bot_username)} ↗</a></p>`:''}</div><button class="btn primary" id="generate-link">${i.telegram_linked?'重新生成绑定码':'生成绑定码'}</button>${i.telegram_linked?' <button class="btn danger" id="unlink-telegram">解除绑定</button>':''}<div id="link-code-result"></div></section><section class="panel integration-card"><div class="integration-icon ai">${icon('spark')}</div><div class="integration-title"><h2>AI 自然语言记账</h2><span class="badge ${i.ai_configured?'posted':'draft'}">${i.ai_configured?'已配置':'等待配置'}</span></div><p>一次说一段话，AI 能同时新增多笔、修改、作废、登记报销、盈余分红或查询；核对操作清单后一次性入账。Web 与 Telegram 共用同一套引擎。</p><div class="code-block">昨天我垫了打车 35 元，老王垫的聚餐 240 元，\n收到客户尾款 2000 美元；\n看看现在能报多少，再把可分红盈余分掉。</div><div class="notice">AI 会读取最近约 120 笔账目的摘要来精准匹配“昨天那笔”“老王未报销的”，但不会发送凭证、密码或会话信息。写操作必须由你核对确认；付款只登记已完成的转账，分红以扣除已报销和历史分红后的真实余额为限，待报销未结清也可登记。</div><h3>服务器配置项</h3><div class="code-block">AI_BASE_URL=你的兼容接口地址\nAI_API_KEY=你的接口密钥\nAI_MODEL=接口支持的模型名称\nAI_CONTEXT_ENTRIES=120\nAI_MAX_ACTIONS=20</div><p class="fx-caption">密钥仅存放在服务器 .env，不会展示在浏览器。尚未配置时，Web 表单和 Telegram 按钮记账仍可使用。</p><a href="#ledger" class="btn wide" data-ai-open>打开 AI 记账助手 →</a></section></div>`;
 }
 function currencyEditorRow(c) {
   return `<div class="currency-edit-row"><input data-cur="code" value="${esc(c.code)}" maxlength="3" aria-label="币种代码" placeholder="USD" required><input data-cur="name" value="${esc(c.name)}" maxlength="20" aria-label="币种名称" placeholder="美元" required><input data-cur="symbol" value="${esc(c.symbol)}" maxlength="8" aria-label="币种符号" placeholder="$" required><select data-cur="decimals" aria-label="币种小数位">${[0,2,3,4].map(d=>`<option ${d===c.decimals?'selected':''}>${d}</option>`).join('')}</select><button type="button" class="icon-button" data-remove-currency aria-label="移除此币种">×</button></div>`;
@@ -459,12 +486,15 @@ function render() {
 }
 async function refresh(renderAfter=true) {
   const loadId=++state.loadId;
+  ++state.calculator.request;state.calculator.report=null;
   const [conf,members,entries,integrations,dividends]=await Promise.all([api('/settings'),api('/members'),api('/entries'),api('/integrations'),api('/dividends')]);
   if(loadId!==state.loadId)return;
   state.conf=conf;state.members=members;state.entries=entries;state.integrations=integrations;state.dividends=dividends;
+  const pendingIds=new Set(entries.filter(e=>e.kind==='expense'&&e.status==='pending').map(e=>e.id));
+  state.calculator.ids=new Set([...state.calculator.ids].filter(id=>pendingIds.has(id)));
   try {state.report=await api('/report'+(state.base?'?base='+encodeURIComponent(state.base):''));}catch(e){state.report=null;toast(e.message,true);}
   if(loadId!==state.loadId)return;
-  if(renderAfter)render();
+  if(renderAfter){render();if(state.page==='calculator')await calculateFunds();}
 }
 async function showAuth(setup) {
   state.setup=setup;$('#loading').hidden=true;$('#app').hidden=true;$('#auth').hidden=false;
@@ -508,7 +538,7 @@ function entryKindChanged() {
   $('#save-draft').hidden=income;
   $('#payer-label').firstChild.textContent=income?'经手成员':'垫付成员';
   $('#save-entry').textContent=income?'确认收入入账':'确认记账';
-  $('#entry-hint').textContent=income?'收入正常入账；报销后的盈余可在盈余分红中登记。':'记账后直接加入待报销，付款后标记已报销。';
+  $('#entry-hint').textContent=income?'收入正常入账；可用余额可在盈余分红中登记，待报销未结清也可分红。':'记账后直接加入待报销，付款后标记已报销。';
 }
 async function saveEntry(status,button) {
   const form=$('#entry-form');if(!form.reportValidity())return;
@@ -618,7 +648,7 @@ document.addEventListener('click',async event=>{
   if(b.id==='add-member'){$('#member-form').reset();$('#member-error').textContent='';$('#member-dialog').showModal();return;}
   if(b.id==='save-draft'){await saveEntry('draft',b);return;}
   if(b.id==='logout'){await busy(b,async()=>{try{await api('/logout','POST');state.user=null;$('#profile-dialog').close();await showAuth(false);}catch(e){toast(e.message,true);}});return;}
-  if(b.id==='refresh-fx'){await busy(b,async()=>{try{state.report=await api('/fx/refresh','POST');state.base=null;render();toast(state.report.complete?'已更新汇率快照':'部分汇率尚不可用',!state.report.complete);}catch(e){toast(e.message,true);}});return;}
+  if(b.id==='refresh-fx'){await busy(b,async()=>{try{state.report=await api('/fx/refresh','POST');state.base=null;++state.calculator.request;state.calculator.report=null;render();await calculateFunds();toast(state.report.complete?'已更新汇率快照':'部分汇率尚不可用',!state.report.complete);}catch(e){toast(e.message,true);}});return;}
   if(b.id==='generate-link'){await busy(b,async()=>{try{const data=await api('/telegram/link-code','POST');$('#link-code-result').innerHTML=`<div class="link-code">/start ${esc(data.code)}</div><p class="fx-caption">10 分钟内有效。请只发给机器人私聊；生成新码后，旧码立即失效。</p>`;}catch(e){toast(e.message,true);}});return;}
   if(b.id==='unlink-telegram'){if(!confirm('解除后，此 Telegram 账号将不能继续记账。确认解除？'))return;try{await api('/telegram/unlink','POST');await refresh();toast('已解除 Telegram 绑定');}catch(e){toast(e.message,true);}return;}
   if(b.hasAttribute('data-toggle-member')){
@@ -641,6 +671,21 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('change',async event=>{
   const el=event.target;
+  if(el.id==='calculator-mode'){
+    const c=state.calculator;c.mode=el.value;
+    if(c.mode==='budget'&&!$('#calculator-form').elements.budget.value)$('#calculator-form').elements.budget.value=c.report?.reserve||state.report?.reserve||'0';
+    $('#calculator-budget-field').hidden=c.mode!=='budget';
+    $('#calculator-form').elements.budget.required=c.mode==='budget';
+    $('#calculator-selection-hint').hidden=c.mode!=='manual';
+    $('#plan-table').innerHTML=planTable(c.report||state.report,c.mode==='manual');
+    await calculateFunds();return;
+  }
+  if(el.hasAttribute('data-calc-select')){
+    const id=Number(el.dataset.calcSelect);el.checked?state.calculator.ids.add(id):state.calculator.ids.delete(id);
+    $('#calculator-selection-count').textContent=state.calculator.ids.size;
+    await calculateFunds();return;
+  }
+  if(el.closest('#calculator-form')){await calculateFunds();return;}
   if(el.dataset.aiSelect!==undefined){
     const index=Number(el.dataset.aiSelect);el.checked?state.ai.selected.add(index):state.ai.selected.delete(index);
     const count=aiSelected(),valid=state.ai.plan?state.ai.plan.actions.filter(a=>!a.errors?.length).length:0;
@@ -658,7 +703,10 @@ document.addEventListener('change',async event=>{
     const id=Number(el.dataset.id),file=el.files[0];el.disabled=true;
     try{if(file.size>6*1024*1024)throw new Error('凭证大小不能超过 6 MB');const data=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(',')[1]);r.onerror=()=>reject(new Error('文件读取失败'));r.readAsDataURL(file);});await api(`/entries/${id}/receipt`,'POST',{data,name:file.name});await refresh();$('#detail-dialog').close();await openDetail(id);toast('凭证已上传');}catch(e){el.disabled=false;toast(e.message,true);}
   }
-  if(el.id==='report-base'){state.base=el.value;try{state.report=await api('/report?base='+encodeURIComponent(state.base));render();}catch(e){toast(e.message,true);}}
+  if(el.id==='report-base'){
+    state.base=el.value;++state.calculator.request;state.calculator.report=null;state.calculator.budget='';
+    try{state.report=await api('/report?base='+encodeURIComponent(state.base));render();if(state.page==='calculator')await calculateFunds();}catch(e){toast(e.message,true);}
+  }
   if(el.hasAttribute('data-cur'))updateCurrencySelects();
 });
 function updateCurrencySelects() {
@@ -689,7 +737,7 @@ document.addEventListener('submit',async event=>{
   const form=event.target;
   if(form.id==='ai-form'){event.preventDefault();await submitAi(form);}
   if(form.id==='calculator-form'){
-    event.preventDefault();await busy($('button',form),async()=>{try{$('#calculator-error').textContent='';const data=await api('/calculate','POST',{...Object.fromEntries(new FormData(form)),base:state.base||state.conf.reference_currency});$('#calculator-result').innerHTML=calcSummary(data,true);$('#plan-table').innerHTML=planTable(data);$('#fx-details').innerHTML=rateDetails(data)+reportWarning(data);}catch(e){$('#calculator-error').textContent=e.message;}});
+    event.preventDefault();await busy($('button[type=submit]',form),calculateFunds);
   }
   if(form.id==='settings-form'){
     event.preventDefault();await busy($('button[type=submit]',form),async()=>{try{
@@ -699,6 +747,6 @@ document.addEventListener('submit',async event=>{
     }catch(e){$('#settings-error').textContent=e.message;}});
   }
 });
-window.addEventListener('hashchange',()=>{state.page=Object.hasOwn(PAGES,location.hash.slice(1))?location.hash.slice(1):'overview';state.selected.clear();$('#sidebar').classList.remove('open');render();window.scrollTo({top:0,behavior:'instant'});});
+window.addEventListener('hashchange',()=>{state.page=Object.hasOwn(PAGES,location.hash.slice(1))?location.hash.slice(1):'overview';state.selected.clear();$('#sidebar').classList.remove('open');render();if(state.page==='calculator')calculateFunds();window.scrollTo({top:0,behavior:'instant'});});
 document.addEventListener('click',e=>{if($('#sidebar').classList.contains('open')&&!e.target.closest('#sidebar,#mobile-menu'))$('#sidebar').classList.remove('open');});
 start();
